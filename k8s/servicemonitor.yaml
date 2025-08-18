@@ -1,0 +1,24 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-servicemonitor
+  namespace: vllm
+  labels:
+    app: vllm
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm
+  endpoints:
+  - port: http
+    interval: 10s
+    path: /metrics
+    scheme: http
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_pod_node_name]
+      targetLabel: node
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
