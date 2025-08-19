@@ -17,3 +17,15 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
         args: ['--maxkb=1000']
+  - repo: local
+    hooks:
+      - id: no-env-files
+        name: Block .env files
+        entry: '.env files must not be committed'
+        language: fail
+        files: '^\.env$|^\.env\.(?!example$).*'
+      - id: no-local-yml
+        name: Block *.local.yml files
+        entry: 'Local override files must not be committed'
+        language: fail
+        files: '.*\.local\.ya?ml$'

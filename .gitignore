@@ -56,10 +56,17 @@ data/
 tmp/
 temp/
 *.tmp
+
+# Local docker-compose overrides (keep out of git)
 docker-compose.override.local.yml
 docker-compose.local.yml
 *.local.yml
 *.local.yaml
+
+# Logs (ignore contents, keep dir)
 logs/*
-docker-compose.override.local.yml
-*.local.yml
+!logs/.gitkeep
+
+# Runtime caches (ignore contents, keep dir)
+cache/*
+!cache/.gitkeep

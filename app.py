@@ -11,7 +11,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Response, APIRouter
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 import uvicorn
 from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
@@ -106,6 +106,8 @@ class GenerateResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     status: str
     timestamp: str
     model_loaded: bool
