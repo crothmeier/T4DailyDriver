@@ -11,7 +11,6 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - HF_HOME=/cache/hf
-      - TRANSFORMERS_CACHE=/cache/hf
       - VLLM_WORKDIR=/cache/vllm
     deploy:
       resources:
@@ -30,6 +29,7 @@ services:
     volumes:
       - ./cache/hf:/cache/hf:rw  # HuggingFace cache (safe: required for model downloads)
       - ./cache/vllm:/cache/vllm:rw  # vLLM working directory (safe: required for vLLM operations)
+      - ./cache/config:/home/vllm/.config:rw  # User config directory (safe: required for vLLM usage reporter)
       - ./logs:/app/logs:rw  # Application logs (safe: required for observability)
     # Security: Drop all capabilities except those needed for service operation
     cap_drop:
