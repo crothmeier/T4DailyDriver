@@ -20,9 +20,22 @@ services:
         limits:
           memory: 32G
           cpus: '8'
+    # Security: Read-only root filesystem with explicit writable mounts
+    read_only: true
+    tmpfs:
+      - /tmp:size=1G  # Runtime temp files (safe: limited size, memory-backed)
     volumes:
-      - model-cache:/root/.cache/huggingface
-      - ./logs:/app/logs
+      - model-cache:/root/.cache/huggingface:rw  # Model cache (safe: required for model downloads)
+      - ./logs:/app/logs:rw  # Application logs (safe: required for observability)
+    # Security: Drop all capabilities except those needed for service operation
+    cap_drop:
+      - ALL  # Drop all capabilities first
+    cap_add:
+      - CHOWN  # File ownership changes (safe: needed for log rotation)
+      - DAC_OVERRIDE  # Bypass file permissions (safe: needed for container user access)
+      - SETUID  # Change process UID (safe: needed for user switching)
+      - SETGID  # Change process GID (safe: needed for group switching)
+      # NET_RAW removed - not needed for HTTP service
     restart: unless-stopped
     networks:
       - vllm-network
@@ -38,9 +51,19 @@ services:
     container_name: prometheus
     ports:
       - "9090:9090"
+    # Security: Read-only root filesystem with explicit writable mount
+    read_only: true
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro  # Config (safe: read-only mount)
+      - prometheus-data:/prometheus:rw  # TSDB storage (safe: required for metrics storage)
+    tmpfs:
+      - /tmp:size=100M  # Runtime temp files (safe: limited size for scrape processing)
+    # Security: Drop unnecessary capabilities
+    cap_drop:
+      - ALL  # Drop all capabilities first
+    cap_add:
+      - DAC_OVERRIDE  # Bypass file permissions (safe: needed for container user access)
+      # NET_RAW removed - not needed for HTTP scraping
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -49,6 +72,12 @@ services:
     networks:
       - vllm-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   grafana:
     image: grafana/grafana:latest
@@ -58,15 +87,34 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
+    # Security: Read-only root filesystem with explicit writable mounts
+    read_only: true
     volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - grafana-data:/var/lib/grafana:rw  # Data storage (safe: required for dashboards/users)
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro  # Dashboards (safe: read-only)
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro  # Datasources (safe: read-only)
+    tmpfs:
+      - /tmp:size=100M  # Runtime temp files (safe: limited size for dashboard rendering)
+    # Security: Drop unnecessary capabilities
+    cap_drop:
+      - ALL  # Drop all capabilities first
+    cap_add:
+      - CHOWN  # File ownership changes (safe: needed for data dir initialization)
+      - DAC_OVERRIDE  # Bypass file permissions (safe: needed for container user access)
+      - SETUID  # Change process UID (safe: needed for user switching)
+      - SETGID  # Change process GID (safe: needed for group switching)
+      # NET_RAW removed - not needed for HTTP service
     networks:
       - vllm-network
     restart: unless-stopped
     depends_on:
       - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
 
   # NVIDIA DCGM Exporter for GPU metrics
   dcgm-exporter:
@@ -84,6 +132,16 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    # Security: Read-only root filesystem
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M  # Runtime temp files (safe: limited size for metrics collection)
+    # Security: Drop unnecessary capabilities
+    cap_drop:
+      - ALL  # Drop all capabilities first
+    cap_add:
+      - DAC_OVERRIDE  # Bypass file permissions (safe: needed for GPU device access)
+      # NET_RAW removed - not needed for metrics export
     networks:
       - vllm-network
     restart: unless-stopped
@@ -94,8 +152,19 @@ services:
     container_name: redis
     ports:
       - "6379:6379"
+    # Security: Read-only root filesystem with explicit writable mount
+    read_only: true
     volumes:
-      - redis-data:/data
+      - redis-data:/data:rw  # Persistent storage (safe: required for cache persistence)
+    tmpfs:
+      - /tmp:size=50M  # Runtime temp files (safe: limited size for Redis operations)
+    # Security: Drop unnecessary capabilities
+    cap_drop:
+      - ALL  # Drop all capabilities first
+    cap_add:
+      - SETUID  # Change process UID (safe: Redis drops privileges)
+      - SETGID  # Change process GID (safe: Redis drops privileges)
+      # NET_RAW removed - not needed for TCP connections
     networks:
       - vllm-network
     restart: unless-stopped
