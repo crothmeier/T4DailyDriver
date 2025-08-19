@@ -9,35 +9,30 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from prometheus_client import (
-    Counter,
-    Histogram,
-    Gauge,
-    generate_latest,
-    CONTENT_TYPE_LATEST,
-)
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 import uvicorn
 from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
 from vllm.utils import random_uuid
 import logging
+from metrics import get_metrics
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Prometheus metrics
-REQUEST_COUNT = Counter("vllm_request_count", "Total number of requests", ["status"])
-REQUEST_DURATION = Histogram(
-    "vllm_request_duration_seconds", "Request duration in seconds"
-)
-ACTIVE_REQUESTS = Gauge("vllm_active_requests", "Number of active requests")
-TOKEN_THROUGHPUT = Histogram("vllm_token_throughput", "Tokens generated per second")
-TTFT = Histogram("vllm_time_to_first_token_seconds", "Time to first token in seconds")
-QUEUE_SIZE = Gauge("vllm_queue_size", "Number of requests in queue")
-GPU_MEMORY_USAGE = Gauge("vllm_gpu_memory_usage_gb", "GPU memory usage in GB")
+# Get Prometheus metrics
+(
+    REQUEST_COUNT,
+    REQUEST_DURATION,
+    ACTIVE_REQUESTS,
+    TOKEN_THROUGHPUT,
+    TTFT,
+    QUEUE_SIZE,
+    GPU_MEMORY_USAGE,
+) = get_metrics()
 
 
 # Connection pool for vLLM engine
@@ -62,7 +57,7 @@ class VLLMConnectionPool:
             quantization="awq",  # AWQ quantization for Mistral-7B
             dtype="float16",
             enforce_eager=False,  # Enable CUDA graphs for better performance
-            max_context_len_to_capture=4096,
+            max_seq_len_to_capture=4096,
             disable_custom_all_reduce=True,  # T4 doesn't benefit from custom all-reduce
         )
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -307,6 +302,64 @@ async def root():
         "model": model_path,
         "status": "running",
     }
+
+
+# OpenAI-compatible API router
+router = APIRouter()
+
+
+@router.post("/v1/completions")
+async def openai_completions(body: dict):
+    """OpenAI-compatible completions endpoint."""
+    prompt = body.get("prompt") or body.get("input") or ""
+    max_tokens = int(body.get("max_tokens", 128))
+    temperature = float(body.get("temperature", 0.7))
+    top_p = float(body.get("top_p", 0.95))
+    top_k = int(body.get("top_k", 50))
+    stop = body.get("stop")
+    presence_penalty = float(body.get("presence_penalty", 0.0))
+    frequency_penalty = float(body.get("frequency_penalty", 0.0))
+
+    # Create request object for generate endpoint
+    request = GenerateRequest(
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        stop=stop,
+        presence_penalty=presence_penalty,
+        frequency_penalty=frequency_penalty,
+        stream=False,
+    )
+
+    # Call the existing generate function
+    response = await generate(request)
+
+    # Format as OpenAI response
+    return {
+        "id": "cmpl-local",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": model_path,
+        "choices": [
+            {
+                "text": response.text,
+                "index": 0,
+                "logprobs": None,
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": len(prompt.split()),  # Rough estimate
+            "completion_tokens": response.tokens_generated,
+            "total_tokens": len(prompt.split()) + response.tokens_generated,
+        },
+    }
+
+
+# Include the router
+app.include_router(router)
 
 
 if __name__ == "__main__":

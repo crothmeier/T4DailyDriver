@@ -56,3 +56,10 @@ data/
 tmp/
 temp/
 *.tmp
+docker-compose.override.local.yml
+docker-compose.local.yml
+*.local.yml
+*.local.yaml
+logs/*
+docker-compose.override.local.yml
+*.local.yml
