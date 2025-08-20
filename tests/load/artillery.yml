@@ -1,0 +1,143 @@
+config:
+  target: "http://localhost:8000"
+  phases:
+    - duration: 60
+      arrivalRate: 2
+      name: "Warm-up"
+    - duration: 120
+      arrivalRate: 8
+      name: "Ramp-up to 16 concurrent users"
+    - duration: 300
+      arrivalRate: 16
+      name: "Sustained load (16 concurrent users)"
+    - duration: 60
+      arrivalRate: 32
+      name: "Peak load test"
+  processor: "./processor.js"
+  plugins:
+    metrics-by-endpoint: {}
+  variables:
+    prompts:
+      - "Explain quantum computing in simple terms"
+      - "What are the benefits of renewable energy?"
+      - "How does machine learning work?"
+      - "Describe the water cycle"
+      - "What is blockchain technology?"
+      - "Explain the theory of relativity"
+      - "What are the causes of climate change?"
+      - "How does the human immune system work?"
+      - "What is artificial intelligence?"
+      - "Explain photosynthesis"
+  defaults:
+    headers:
+      Content-Type: "application/json"
+
+scenarios:
+  - name: "Text Completion"
+    weight: 40
+    flow:
+      - post:
+          url: "/v1/completions"
+          json:
+            prompt: "{{ prompts[Math.floor(Math.random() * prompts.length)] }}"
+            max_tokens: 100
+            temperature: 0.7
+            top_p: 0.9
+          capture:
+            - json: "$.id"
+              as: "completion_id"
+          expect:
+            - statusCode: 200
+            - contentType: json
+            - hasProperty: "choices"
+          afterResponse: "logMetrics"
+
+  - name: "Chat Completion"
+    weight: 30
+    flow:
+      - post:
+          url: "/v1/chat/completions"
+          json:
+            messages:
+              - role: "system"
+                content: "You are a helpful assistant."
+              - role: "user"
+                content: "{{ prompts[Math.floor(Math.random() * prompts.length)] }}"
+            max_tokens: 150
+            temperature: 0.8
+          capture:
+            - json: "$.id"
+              as: "chat_id"
+          expect:
+            - statusCode: 200
+            - contentType: json
+            - hasProperty: "choices[0].message"
+          afterResponse: "logMetrics"
+
+  - name: "Streaming Completion"
+    weight: 20
+    flow:
+      - post:
+          url: "/v1/completions"
+          json:
+            prompt: "{{ prompts[Math.floor(Math.random() * prompts.length)] }}"
+            max_tokens: 200
+            temperature: 0.7
+            stream: true
+          capture:
+            - header: "content-type"
+              as: "stream_content_type"
+          expect:
+            - statusCode: 200
+          afterResponse: "logStreamingMetrics"
+
+  - name: "Batch Processing"
+    weight: 5
+    flow:
+      - post:
+          url: "/v1/completions/batch"
+          json:
+            prompts:
+              - "{{ prompts[0] }}"
+              - "{{ prompts[1] }}"
+              - "{{ prompts[2] }}"
+            max_tokens: 50
+            temperature: 0.6
+          expect:
+            - statusCode: 200
+            - hasProperty: "completions"
+            - equals:
+                - "{{ completions.length }}"
+                - 3
+          afterResponse: "logBatchMetrics"
+
+  - name: "Health Check"
+    weight: 5
+    flow:
+      - get:
+          url: "/health"
+          expect:
+            - statusCode: 200
+            - equals:
+                - "{{ status }}"
+                - "healthy"
+      - think: 1
+      - get:
+          url: "/ready"
+          expect:
+            - statusCode: 200
+            - equals:
+                - "{{ status }}"
+                - "ready"
+      - think: 1
+      - get:
+          url: "/stats"
+          capture:
+            - json: "$.gpu_memory_usage"
+              as: "gpu_memory"
+            - json: "$.active_requests"
+              as: "active_requests"
+          expect:
+            - statusCode: 200
+            - hasProperty: "model_loaded"
+          afterResponse: "logSystemMetrics"
