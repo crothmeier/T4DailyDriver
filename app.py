@@ -3,20 +3,20 @@ Production-ready vLLM service with connection pooling, Prometheus metrics, and h
 Optimized for Tesla T4 GPU with Mistral-7B AWQ quantization.
 """
 
+import logging
 import os
 import time
-from typing import Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Response, APIRouter
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 import uvicorn
-from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
+from fastapi import APIRouter, FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from pydantic import BaseModel, ConfigDict, Field
+from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.utils import random_uuid
-import logging
+
 from metrics import get_metrics
 
 # Configure logging
@@ -40,7 +40,7 @@ class VLLMConnectionPool:
     def __init__(self, model_path: str, max_connections: int = 1):
         self.model_path = model_path
         self.max_connections = max_connections
-        self.engine: Optional[AsyncLLMEngine] = None
+        self.engine: AsyncLLMEngine | None = None
         self.active_requests = 0
         self.total_requests = 0
 
@@ -92,7 +92,7 @@ class GenerateRequest(BaseModel):
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     top_k: int = Field(default=50, ge=1)
     stream: bool = Field(default=False)
-    stop: Optional[List[str]] = None
+    stop: list[str] | None = None
     presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
     frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
 
@@ -113,7 +113,7 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     active_requests: int
     total_requests: int
-    gpu_memory_usage_gb: Optional[float]
+    gpu_memory_usage_gb: float | None
 
 
 # Initialize connection pool
@@ -167,7 +167,7 @@ async def health_check():
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @app.get("/metrics")
@@ -203,14 +203,12 @@ async def generate(request: GenerateRequest):
         if request.stream:
             return await generate_stream(engine, request, sampling_params, request_id)
         else:
-            return await generate_batch(
-                engine, request, sampling_params, request_id, start_time
-            )
+            return await generate_batch(engine, request, sampling_params, request_id, start_time)
 
     except Exception as e:
         REQUEST_COUNT.labels(status="error").inc()
         logger.error(f"Generation failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     finally:
         await connection_pool.release_connection()
 
@@ -259,9 +257,7 @@ async def generate_stream(engine, request, sampling_params, request_id):
         total_tokens = 0
 
         try:
-            results_generator = engine.generate(
-                request.prompt, sampling_params, request_id
-            )
+            results_generator = engine.generate(request.prompt, sampling_params, request_id)
 
             async for request_output in results_generator:
                 if not ttft_recorded and len(request_output.outputs[0].token_ids) > 0:
@@ -276,9 +272,7 @@ async def generate_stream(engine, request, sampling_params, request_id):
 
             # Send final metrics
             generation_time = time.time() - start_time
-            tokens_per_second = (
-                total_tokens / generation_time if generation_time > 0 else 0
-            )
+            tokens_per_second = total_tokens / generation_time if generation_time > 0 else 0
             TOKEN_THROUGHPUT.observe(tokens_per_second)
             REQUEST_COUNT.labels(status="success").inc()
 

@@ -141,23 +141,215 @@ On Tesla T4 with Mistral-7B AWQ:
 
 ## Development
 
+### Prerequisites
+
+- Python 3.10 (required)
+- NVIDIA GPU with CUDA 12.1+ support
+- Docker and Docker Compose
+- Git
+
+### Development Environment Setup
+
+#### Quick Setup (Recommended)
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd T4DailyDriver
+
+# Run the automated setup script
+make dev-setup
+
+# Activate the virtual environment
+source .venv/bin/activate
+```
+
+The `make dev-setup` command will:
+- Detect and validate Python 3.10
+- Create a virtual environment
+- Install all dependencies with proper constraints
+- Configure pre-commit hooks
+- Set up the development environment
+
+#### Manual Setup
+
+If you prefer to set up manually or need to troubleshoot:
+
+```bash
+# 1. Ensure Python 3.10 is installed
+python3.10 --version
+
+# 2. Create virtual environment
+python3.10 -m venv .venv
+source .venv/bin/activate
+
+# 3. Upgrade pip and install base packages
+pip install --upgrade pip setuptools wheel
+
+# 4. Install dependencies with constraints
+export PIP_CONSTRAINT=constraints-cu121-py310.txt
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+# 5. Install pre-commit hooks
+pre-commit install
+pre-commit run --all-files  # Run on all files to verify
+```
+
+#### Using direnv (Optional)
+
+For automatic environment activation:
+
+```bash
+# Install direnv (if not already installed)
+# macOS: brew install direnv
+# Ubuntu: sudo apt-get install direnv
+
+# Allow direnv in this directory
+direnv allow
+
+# The environment will now activate automatically when you cd into the directory
+```
+
+### Python Version Management
+
+This project requires Python 3.10. If you have multiple Python versions:
+
+#### Ubuntu/Debian
+```bash
+# Install Python 3.10
+sudo apt-get update
+sudo apt-get install python3.10 python3.10-venv python3.10-dev
+
+# Verify installation
+python3.10 --version
+```
+
+#### macOS
+```bash
+# Using Homebrew
+brew install python@3.10
+
+# Verify installation
+python3.10 --version
+```
+
+#### Using pyenv (Cross-platform)
+```bash
+# Install Python 3.10
+pyenv install 3.10.13
+pyenv local 3.10.13
+
+# Verify
+python --version
+```
+
+### Common Development Tasks
+
+```bash
+# Run pre-commit hooks on all files
+make pre-commit
+
+# Format code
+make format
+
+# Run linting
+make lint
+
+# Run unit tests
+make test-unit
+
+# Run all tests with coverage
+make test
+
+# Start local development server
+make up-local
+
+# View logs
+make logs
+
+# Stop services
+make down
+```
+
 ### Building Docker Image
 
 ```bash
-docker build -t vllm-service:latest .
+# Build with CUDA support
+make docker-build
+
+# Or manually with specific options
+docker build \
+  --build-arg BASE_IMAGE=nvidia/cuda:12.1.0-runtime-ubuntu22.04 \
+  -t vllm-service:latest .
 ```
 
 ### Running Tests
 
 ```bash
-# Install dev dependencies
-pip install -r requirements-dev.txt
+# Run all tests
+make test
 
-# Run tests
-pytest tests/
+# Run unit tests only
+make test-unit
 
-# Run with coverage
-pytest --cov=app tests/
+# Run integration tests (requires running service)
+make test-integration
+
+# Run with coverage report
+pytest --cov=app --cov-report=html tests/
+# View coverage report in htmlcov/index.html
+
+# Run security checks
+make test-security
+```
+
+### Pre-commit Hooks
+
+This project uses pre-commit hooks to maintain code quality:
+
+- **black**: Code formatting
+- **isort**: Import sorting
+- **ruff**: Fast Python linting
+- **hadolint**: Dockerfile linting
+- **detect-secrets**: Prevent secrets in code
+- Various safety checks (YAML, JSON, merge conflicts, etc.)
+
+To bypass hooks temporarily (not recommended):
+```bash
+git commit --no-verify -m "your message"
+```
+
+### Troubleshooting Development Setup
+
+#### Issue: Python 3.11 interpreter error
+```bash
+# Solution: Ensure Python 3.10 is used
+make dev-setup  # This will detect and use Python 3.10
+```
+
+#### Issue: Virtual environment using wrong Python version
+```bash
+# Remove and recreate virtual environment
+rm -rf .venv
+make dev-setup
+```
+
+#### Issue: Pre-commit hooks failing
+```bash
+# Update hooks to latest versions
+pre-commit autoupdate
+
+# Clean and reinstall
+pre-commit clean
+pre-commit install
+```
+
+#### Issue: Dependencies conflict
+```bash
+# Use the constraint file
+export PIP_CONSTRAINT=constraints-cu121-py310.txt
+pip install -r requirements.txt
 ```
 
 ## License

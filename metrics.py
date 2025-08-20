@@ -1,9 +1,7 @@
-from prometheus_client import Counter, Histogram, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 _METRICS_INIT = False
-REQUEST_COUNT = REQUEST_DURATION = ACTIVE_REQUESTS = TOKEN_THROUGHPUT = TTFT = (
-    QUEUE_SIZE
-) = GPU_MEMORY_USAGE = None
+REQUEST_COUNT = REQUEST_DURATION = ACTIVE_REQUESTS = TOKEN_THROUGHPUT = TTFT = QUEUE_SIZE = GPU_MEMORY_USAGE = None
 
 
 def get_metrics():
@@ -11,9 +9,7 @@ def get_metrics():
     global REQUEST_COUNT, REQUEST_DURATION, ACTIVE_REQUESTS, TOKEN_THROUGHPUT, TTFT, QUEUE_SIZE, GPU_MEMORY_USAGE
     if not _METRICS_INIT:
         REQUEST_COUNT = Counter("vllm_request_count", "Total requests", ["status"])
-        REQUEST_DURATION = Histogram(
-            "vllm_request_duration_seconds", "Request duration seconds"
-        )
+        REQUEST_DURATION = Histogram("vllm_request_duration_seconds", "Request duration seconds")
         ACTIVE_REQUESTS = Gauge("vllm_active_requests", "Active requests")
         TOKEN_THROUGHPUT = Histogram("vllm_token_throughput", "Tokens per second")
         TTFT = Histogram("vllm_time_to_first_token_seconds", "TTFT seconds")

@@ -1,0 +1,55 @@
+# Development dependencies for T4 Daily Driver
+# Python 3.10 required
+
+# Testing frameworks
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.11.0
+pytest-timeout>=2.1.0
+httpx>=0.24.0  # For async HTTP testing
+
+# Code quality and linting
+ruff>=0.4.4
+black>=24.4.2
+isort>=5.13.2
+mypy>=1.10.0
+pylint>=3.0.0
+
+# Security scanning
+safety>=3.0.0
+bandit>=1.7.5
+
+# Pre-commit
+pre-commit>=3.5.0
+
+# Documentation
+sphinx>=7.0.0
+sphinx-rtd-theme>=2.0.0
+myst-parser>=2.0.0
+
+# Development utilities
+ipython>=8.12.0
+ipdb>=0.13.13
+rich>=13.7.0  # Pretty printing and debugging
+watchdog>=3.0.0  # File watching for auto-reload
+
+# Type stubs
+types-requests>=2.31.0
+types-PyYAML>=6.0.12
+
+# Performance profiling
+py-spy>=0.3.14
+memory-profiler>=0.61.0
+line-profiler>=4.0.0
+
+# API testing
+locust>=2.0.0  # Alternative to Artillery for Python
+responses>=0.23.0  # Mock HTTP responses
+
+# Coverage reporting
+coverage[toml]>=7.0.0
+coverage-badge>=1.1.0
+
+# Load testing dependencies (optional, for artillery.yml)
+# Note: Artillery itself is installed via npm (see Makefile)

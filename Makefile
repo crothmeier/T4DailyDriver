@@ -1,10 +1,13 @@
-.PHONY: help prepare-caches up-local down smoke logs logs-all services clean-caches build stop clean deploy k8s-apply k8s-delete k8s-status k8s-logs port-forward metrics lint format test-local deploy-build
+.PHONY: help prepare-caches up-local down smoke logs logs-all services clean-caches build stop clean deploy k8s-apply k8s-delete k8s-status k8s-logs port-forward metrics lint format test-local deploy-build test test-unit test-integration test-load test-security install install-dev dev-setup docker-build docker-run docker-stop pre-commit setup-hooks
 
 # Variables
 IMAGE_NAME := vllm-service
 IMAGE_TAG := latest
 NAMESPACE := vllm
 REGISTRY :=
+PYTHON := python3
+PIP := $(PYTHON) -m pip
+PYTEST := $(PYTHON) -m pytest
 
 # Default target
 help: ## Show this help message
@@ -97,9 +100,123 @@ clean: ## Clean up resources
 
 lint: ## Lint Python code
 	@which ruff >/dev/null 2>&1 || pip install ruff
-	ruff check app.py
-	ruff format --check app.py
+	ruff check .
+	black --check .
+	isort --check-only .
+	@if [ -f Dockerfile ]; then \
+		if command -v hadolint >/dev/null 2>&1; then \
+			hadolint Dockerfile; \
+		else \
+			echo "Hadolint not installed. Install from: https://github.com/hadolint/hadolint"; \
+		fi \
+	fi
 
 format: ## Format Python code
 	@which ruff >/dev/null 2>&1 || pip install ruff
-	ruff format app.py
+	black .
+	isort .
+	ruff check . --fix
+
+# Testing targets
+test: test-unit test-integration ## Run all tests
+
+test-unit: ## Run unit tests with coverage
+	@echo "Running unit tests..."
+	$(PYTEST) tests/unit/ -v --cov=app --cov-report=term-missing --cov-report=html --cov-report=xml
+
+test-integration: ## Run integration tests
+	@echo "Running integration tests..."
+	@if ! curl -f http://localhost:8000/health 2>/dev/null; then \
+		echo "Error: Service not running on localhost:8000. Please start the service first."; \
+		echo "Run: make docker-run"; \
+		exit 1; \
+	fi
+	$(PYTEST) tests/integration/ -v -s
+
+test-load: ## Run load tests with Artillery
+	@echo "Running load tests..."
+	@if ! command -v artillery >/dev/null 2>&1; then \
+		echo "Installing Artillery..."; \
+		npm install -g artillery artillery-plugin-metrics-by-endpoint; \
+	fi
+	@if ! curl -f http://localhost:8000/health 2>/dev/null; then \
+		echo "Error: Service not running on localhost:8000. Please start the service first."; \
+		echo "Run: make docker-run"; \
+		exit 1; \
+	fi
+	artillery run tests/load/artillery.yml --output reports/load-test-$(shell date +%Y%m%d-%H%M%S).json
+	@echo "Load test complete. Report saved to reports/"
+
+test-security: ## Run security scans
+	@echo "Running security scans..."
+	@echo "Checking Python dependencies with safety..."
+	safety check --json || true
+	@echo ""
+	@echo "Scanning with trivy..."
+	@if command -v trivy >/dev/null 2>&1; then \
+		trivy fs . --severity HIGH,CRITICAL; \
+	else \
+		echo "Trivy not installed. Install from: https://github.com/aquasecurity/trivy"; \
+	fi
+	@echo ""
+	@echo "Checking for secrets..."
+	@if command -v detect-secrets >/dev/null 2>&1; then \
+		detect-secrets scan --baseline .secrets.baseline; \
+	else \
+		echo "detect-secrets not installed. Run: pip install detect-secrets"; \
+	fi
+
+# Installation targets
+install: ## Install dependencies
+	$(PIP) install --upgrade pip
+	$(PIP) install -r requirements.txt
+
+install-dev: ## Install development dependencies
+	$(PIP) install --upgrade pip setuptools wheel
+	$(PIP) install --index-url https://download.pytorch.org/whl/cu121 torch==2.3.1 torchvision==0.18.1
+	PIP_CONSTRAINT=constraints-cu121-py310.txt $(PIP) install -r requirements.txt
+	$(PIP) install pytest pytest-cov pytest-asyncio httpx ruff black isort safety pre-commit
+	pre-commit install
+
+dev-setup: ## Complete development environment setup (Python 3.10, venv, deps, pre-commit)
+	@echo "Setting up development environment..."
+	@bash scripts/setup-dev.sh
+	@echo "Setup complete! Activate your environment with: source .venv/bin/activate"
+
+# Docker operations
+docker-build: ## Build Docker image with proper CUDA support
+	docker build \
+		--build-arg BASE_IMAGE=nvidia/cuda:12.1.0-runtime-ubuntu22.04 \
+		--build-arg CUDA_VERSION=12.1.0 \
+		-t $(IMAGE_NAME):$(IMAGE_TAG) \
+		-t $(IMAGE_NAME):$(shell git rev-parse --short HEAD 2>/dev/null || echo "latest") \
+		.
+
+docker-run: ## Run Docker container with GPU
+	@echo "Starting vLLM service container..."
+	docker run -d \
+		--name vllm-service \
+		--gpus all \
+		-p 8000:8000 \
+		-e MODEL_NAME=mistralai/Mistral-7B-v0.1 \
+		-e QUANTIZATION=awq \
+		-e MAX_MODEL_LEN=4096 \
+		-e GPU_MEMORY_UTILIZATION=0.9 \
+		-v $(PWD)/models:/models \
+		$(IMAGE_NAME):$(IMAGE_TAG)
+	@echo "Container started. Check logs with: docker logs -f vllm-service"
+	@echo "Service will be available at http://localhost:8000 once model is loaded"
+
+docker-stop: ## Stop and remove Docker container
+	@echo "Stopping vLLM service container..."
+	docker stop vllm-service 2>/dev/null || true
+	docker rm vllm-service 2>/dev/null || true
+
+# Pre-commit hooks
+pre-commit: ## Run pre-commit hooks
+	pre-commit run --all-files
+
+setup-hooks: ## Set up git hooks
+	pre-commit install
+	pre-commit install --hook-type commit-msg
+	@echo "Git hooks installed successfully!"
