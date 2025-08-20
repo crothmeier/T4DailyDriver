@@ -11,9 +11,17 @@ ENV/
 pip-log.txt
 pip-delete-this-directory.txt
 .pytest_cache/
+.ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
 *.log
+build/
+dist/
+*.egg-info/
+.ipynb_checkpoints/
+.mypy_cache/
+.dmypy.json
 
 # Model cache
 model_cache/
@@ -23,6 +31,8 @@ model_cache/
 
 # Environment
 .env
+*.env
+!.env.example
 .env.local
 .env.*.local
 
