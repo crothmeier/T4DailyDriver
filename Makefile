@@ -126,8 +126,8 @@ test-unit: ## Run unit tests with coverage
 
 test-integration: ## Run integration tests
 	@echo "Running integration tests..."
-	@if ! curl -f http://localhost:8000/health 2>/dev/null; then \
-		echo "Error: Service not running on localhost:8000. Please start the service first."; \
+	@if ! curl -f http://localhost:8080/health 2>/dev/null; then \
+		echo "Error: Service not running on localhost:8080. Please start the service first."; \
 		echo "Run: make docker-run"; \
 		exit 1; \
 	fi
@@ -139,8 +139,8 @@ test-load: ## Run load tests with Artillery
 		echo "Installing Artillery..."; \
 		npm install -g artillery artillery-plugin-metrics-by-endpoint; \
 	fi
-	@if ! curl -f http://localhost:8000/health 2>/dev/null; then \
-		echo "Error: Service not running on localhost:8000. Please start the service first."; \
+	@if ! curl -f http://localhost:8080/health 2>/dev/null; then \
+		echo "Error: Service not running on localhost:8080. Please start the service first."; \
 		echo "Run: make docker-run"; \
 		exit 1; \
 	fi
@@ -197,7 +197,7 @@ docker-run: ## Run Docker container with GPU
 	docker run -d \
 		--name vllm-service \
 		--gpus all \
-		-p 8000:8000 \
+		-p 8080:8080 \
 		-e MODEL_NAME=mistralai/Mistral-7B-v0.1 \
 		-e QUANTIZATION=awq \
 		-e MAX_MODEL_LEN=4096 \
@@ -205,7 +205,7 @@ docker-run: ## Run Docker container with GPU
 		-v $(PWD)/models:/models \
 		$(IMAGE_NAME):$(IMAGE_TAG)
 	@echo "Container started. Check logs with: docker logs -f vllm-service"
-	@echo "Service will be available at http://localhost:8000 once model is loaded"
+	@echo "Service will be available at http://localhost:8080 once model is loaded"
 
 docker-stop: ## Stop and remove Docker container
 	@echo "Stopping vLLM service container..."

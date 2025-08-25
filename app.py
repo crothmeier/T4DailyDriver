@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+from vllm.outputs import RequestOutput
 from vllm.utils import random_uuid
 
 from metrics import get_metrics
@@ -43,6 +44,7 @@ class VLLMConnectionPool:
         self.engine: AsyncLLMEngine | None = None
         self.active_requests = 0
         self.total_requests = 0
+        self.is_ready = False  # Track if model is fully loaded and warmed up
 
     async def initialize(self):
         """Initialize the vLLM engine with T4-optimized parameters."""
@@ -125,9 +127,43 @@ connection_pool = VLLMConnectionPool(model_path)
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
     # Startup
+    logger.info("Initializing vLLM engine...")
     await connection_pool.initialize()
+
+    # Perform model warmup
+    logger.info("Performing model warmup...")
+    try:
+        engine = await connection_pool.get_connection()
+
+        # Create a simple test prompt for warmup
+        warmup_prompt = "Hello, this is a test."
+        warmup_params = SamplingParams(
+            temperature=0.7,
+            max_tokens=10,
+            top_p=0.95
+        )
+
+        # Generate a test completion to ensure model is loaded
+        warmup_request_id = random_uuid()
+        results_generator = engine.generate(warmup_prompt, warmup_params, warmup_request_id)
+
+        # Wait for completion
+        async for _ in results_generator:
+            pass  # Just iterate to complete the generation
+
+        await connection_pool.release_connection()
+        logger.info("✓ Model warmup completed successfully")
+        connection_pool.is_ready = True  # Mark as ready after successful warmup
+
+    except Exception as e:
+        logger.error(f"Model warmup failed: {e}")
+        # Continue anyway - warmup is not critical
+        connection_pool.is_ready = True  # Mark as ready even if warmup fails
+
     yield
+
     # Shutdown
+    logger.info("Shutting down vLLM engine...")
     await connection_pool.shutdown()
 
 
@@ -142,7 +178,10 @@ app = FastAPI(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
+    """
+    Liveness probe endpoint.
+    Returns 200 if the service is running, regardless of model state.
+    """
     try:
         # Get GPU memory usage if available
         gpu_memory = None
@@ -157,8 +196,9 @@ async def health_check():
         except Exception:
             pass
 
+        # Always return healthy for liveness - service is running
         return HealthResponse(
-            status="healthy" if connection_pool.engine else "initializing",
+            status="healthy",
             timestamp=datetime.utcnow().isoformat(),
             model_loaded=connection_pool.engine is not None,
             active_requests=connection_pool.active_requests,
@@ -168,6 +208,28 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@app.get("/ready")
+async def ready_check():
+    """
+    Readiness probe endpoint.
+    Returns 200 only when the model is fully loaded and ready to serve requests.
+    Returns 503 during initialization.
+    """
+    if not connection_pool.is_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Model is still loading. Please wait..."
+        )
+
+    return {
+        "status": "ready",
+        "model": model_path,
+        "timestamp": datetime.utcnow().isoformat(),
+        "active_requests": connection_pool.active_requests,
+        "total_requests": connection_pool.total_requests
+    }
 
 
 @app.get("/metrics")
@@ -222,16 +284,21 @@ async def generate_batch(engine, request, sampling_params, request_id, start_tim
     final_output = None
     ttft_recorded = False
     async for request_output in results_generator:
-        if not ttft_recorded and len(request_output.outputs[0].token_ids) > 0:
-            ttft = time.time() - start_time
-            TTFT.observe(ttft)
-            ttft_recorded = True
-        final_output = request_output
+        # Ensure we have a RequestOutput object
+        if isinstance(request_output, RequestOutput):
+            if not ttft_recorded and request_output.outputs and len(request_output.outputs[0].token_ids) > 0:
+                ttft = time.time() - start_time
+                TTFT.observe(ttft)
+                ttft_recorded = True
+            final_output = request_output
+
+    if not final_output or not final_output.outputs:
+        raise HTTPException(status_code=500, detail="No output generated")
 
     # Process response
     generation_time = time.time() - start_time
     output = final_output.outputs[0]
-    tokens_generated = len(output.token_ids)
+    tokens_generated = len(output.token_ids) if output.token_ids else 0
     tokens_per_second = tokens_generated / generation_time if generation_time > 0 else 0
 
     # Record metrics
@@ -240,7 +307,7 @@ async def generate_batch(engine, request, sampling_params, request_id, start_tim
     REQUEST_COUNT.labels(status="success").inc()
 
     return GenerateResponse(
-        text=output.text,
+        text=output.text or "",
         tokens_generated=tokens_generated,
         generation_time=generation_time,
         tokens_per_second=tokens_per_second,
@@ -255,20 +322,28 @@ async def generate_stream(engine, request, sampling_params, request_id):
         start_time = time.time()
         ttft_recorded = False
         total_tokens = 0
+        last_text_length = 0
 
         try:
             results_generator = engine.generate(request.prompt, sampling_params, request_id)
 
             async for request_output in results_generator:
-                if not ttft_recorded and len(request_output.outputs[0].token_ids) > 0:
-                    ttft = time.time() - start_time
-                    TTFT.observe(ttft)
-                    ttft_recorded = True
+                # Ensure we have a RequestOutput object
+                if isinstance(request_output, RequestOutput) and request_output.outputs:
+                    output = request_output.outputs[0]
 
-                output = request_output.outputs[0]
-                if output.text:
-                    total_tokens = len(output.token_ids)
-                    yield f"data: {output.text}\n\n"
+                    if not ttft_recorded and output.token_ids and len(output.token_ids) > 0:
+                        ttft = time.time() - start_time
+                        TTFT.observe(ttft)
+                        ttft_recorded = True
+
+                    # Stream only new text (incremental)
+                    if output.text:
+                        new_text = output.text[last_text_length:]
+                        if new_text:
+                            last_text_length = len(output.text)
+                            total_tokens = len(output.token_ids) if output.token_ids else 0
+                            yield f"data: {new_text}\n\n"
 
             # Send final metrics
             generation_time = time.time() - start_time
@@ -280,6 +355,7 @@ async def generate_stream(engine, request, sampling_params, request_id):
 
         except Exception as e:
             REQUEST_COUNT.labels(status="error").inc()
+            logger.error(f"Streaming generation failed: {e}")
             yield f"data: ERROR: {str(e)}\n\n"
 
     return StreamingResponse(

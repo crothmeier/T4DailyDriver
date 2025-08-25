@@ -30,13 +30,6 @@ RUN set -eux; \
 # Keep CUDA wheels preferred for any later installs
 ENV PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu121"
 
-# Create dummy pyairports package to satisfy dependency
-RUN mkdir -p /tmp/pyairports && \
-    echo "from setuptools import setup; setup(name='pyairports', version='2.1.1')" > /tmp/pyairports/setup.py && \
-    cd /tmp/pyairports && \
-    python3 -m pip install --no-cache-dir . && \
-    cd / && rm -rf /tmp/pyairports
-
 # Copy constraints file
 COPY constraints.txt .
 
@@ -46,8 +39,21 @@ RUN python3 -m pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 COPY . .
 
+# Pre-download model with cache mount for efficiency
+# This allows Docker to cache the model layer separately
+ENV HF_HOME=/cache/hf
+ENV MODEL_PATH="TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
+
+# Download model during build with cache mount
+RUN --mount=type=cache,target=/cache/hf,sharing=locked \
+    python3 scripts/download_model.py "${MODEL_PATH}" /cache/hf && \
+    # Copy downloaded model to image layer for persistence
+    mkdir -p /model-cache && \
+    cp -r /cache/hf/* /model-cache/ 2>/dev/null || true
+
 # Create non-root user
-RUN useradd -m -u 1000 vllm && chown -R vllm:vllm /app
+RUN useradd -m -u 1000 vllm && chown -R vllm:vllm /app && \
+    chown -R vllm:vllm /model-cache || true
 USER vllm
 
 # Expose ports
@@ -57,6 +63,7 @@ EXPOSE 8080
 ENV PYTHONUNBUFFERED=1
 ENV CUDA_VISIBLE_DEVICES=0
 ENV MODEL_PATH="TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
+ENV HF_HOME=/model-cache
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

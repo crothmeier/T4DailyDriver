@@ -246,7 +246,7 @@ jobs:
         run: |
           docker run -d \
             --name vllm-test \
-            -p 8000:8000 \
+            -p 8080:8080 \
             -e MODEL_NAME=mistralai/Mistral-7B-v0.1 \
             -e QUANTIZATION=awq \
             -e MAX_MODEL_LEN=4096 \
@@ -255,7 +255,7 @@ jobs:
       - name: Wait for service to be ready
         run: |
           for i in {1..60}; do
-            if curl -f http://localhost:8000/health; then
+            if curl -f http://localhost:8080/health; then
               echo "Service is ready"
               break
             fi
@@ -296,7 +296,7 @@ jobs:
         run: |
           docker run -d \
             --name vllm-load-test \
-            -p 8000:8000 \
+            -p 8080:8080 \
             -e MODEL_NAME=mistralai/Mistral-7B-v0.1 \
             -e QUANTIZATION=awq \
             -e MAX_MODEL_LEN=4096 \
@@ -306,7 +306,7 @@ jobs:
       - name: Wait for service to be ready
         run: |
           for i in {1..60}; do
-            if curl -f http://localhost:8000/health; then
+            if curl -f http://localhost:8080/health; then
               echo "Service is ready"
               break
             fi

@@ -8,7 +8,7 @@ import pytest
 
 @pytest.fixture(scope="module")
 def service_url():
-    return "http://localhost:8000"
+    return "http://localhost:8080"
 
 
 @pytest.fixture(scope="module")
