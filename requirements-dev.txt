@@ -8,6 +8,7 @@ pytest-asyncio>=0.21.0
 pytest-mock>=3.11.0
 pytest-timeout>=2.1.0
 httpx>=0.24.0  # For async HTTP testing
+anyio>=4.0.0  # Async compatibility layer
 
 # Code quality and linting
 ruff>=0.4.4

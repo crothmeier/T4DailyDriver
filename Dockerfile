@@ -32,6 +32,11 @@ ENV PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu121"
 
 # Copy constraints file
 COPY constraints.txt .
+# Install dummy pyairports
+RUN python3 -m pip install --no-deps git+https://github.com/vllm-project/vllm.git@v0.5.3#egg=pyairports || \
+    (mkdir -p /tmp/pyairports && \
+     echo "from setuptools import setup; setup(name='pyairports', version='2.1.1')" > /tmp/pyairports/setup.py && \
+     cd /tmp/pyairports && python3 -m pip install . && cd / && rm -rf /tmp/pyairports)
 
 # Install requirements with constraints
 RUN python3 -m pip install --no-cache-dir -r requirements.txt -c constraints.txt && \
@@ -70,4 +75,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the application
-CMD ["python3", "-u", "app.py"]
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]
