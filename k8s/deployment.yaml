@@ -78,10 +78,10 @@ spec:
           httpGet:
             path: /health
             port: http
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 30  # Allow up to 5 minutes for startup
+          initialDelaySeconds: 60  # Give time for container init
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 40  # Allow up to 10 minutes for startup (60s + 40*15s)
           successThreshold: 1
 
         # Liveness probe - checks if service is alive
@@ -99,11 +99,11 @@ spec:
           httpGet:
             path: /ready
             port: http
-          initialDelaySeconds: 10  # Start checking soon after startup probe succeeds
-          periodSeconds: 10
-          timeoutSeconds: 5
-          successThreshold: 1
-          failureThreshold: 3
+          initialDelaySeconds: 5  # Start checking soon after startup probe succeeds
+          periodSeconds: 15
+          timeoutSeconds: 10
+          successThreshold: 2  # Require 2 consecutive successes
+          failureThreshold: 5  # More tolerance during operation
 
         # Security context
         securityContext:
