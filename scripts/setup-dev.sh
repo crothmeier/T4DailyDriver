@@ -206,7 +206,7 @@ GPU_MEMORY_UTILIZATION=0.95
 
 # API configuration
 HOST=0.0.0.0
-PORT=8000
+PORT=8080
 
 # Redis configuration (if using distributed inference)
 # REDIS_HOST=redis
