@@ -39,10 +39,10 @@ services:
       - vllm-network
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/ready || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 20  # Try for 5 minutes (20 * 15s)
-      start_period: 180s  # Give 3 minutes for model loading
+      interval: 20s
+      timeout: 10s
+      retries: 30  # Try for 10 minutes (30 * 20s)
+      start_period: 300s  # Give 5 minutes for model loading
 
   prometheus:
     image: prom/prometheus:latest

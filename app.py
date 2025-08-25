@@ -3,6 +3,7 @@ Production-ready vLLM service with connection pooling, Prometheus metrics, and h
 Optimized for Tesla T4 GPU with Mistral-7B AWQ quantization.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -10,14 +11,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import uvicorn
-from fastapi import APIRouter, FastAPI, HTTPException, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.outputs import RequestOutput
 from vllm.utils import random_uuid
 
+from auth import limiter, verify_api_key
 from metrics import get_metrics
 
 # Configure logging
@@ -36,7 +41,7 @@ logger = logging.getLogger(__name__)
 ) = get_metrics()
 
 
-# Connection pool for vLLM engine
+# Connection pool for vLLM engine with request queuing
 class VLLMConnectionPool:
     def __init__(self, model_path: str, max_connections: int = 1):
         self.model_path = model_path
@@ -45,6 +50,15 @@ class VLLMConnectionPool:
         self.active_requests = 0
         self.total_requests = 0
         self.is_ready = False  # Track if model is fully loaded and warmed up
+
+        # Request queue management
+        self.max_queue_size = int(os.getenv("MAX_QUEUE_SIZE", "50"))
+        self.request_queue = asyncio.Queue(maxsize=self.max_queue_size)
+        self.queue_processor_task = None
+
+        # Track queue metrics
+        self.queued_requests = 0
+        self.rejected_requests = 0
 
     async def initialize(self):
         """Initialize the vLLM engine with T4-optimized parameters."""
@@ -65,13 +79,80 @@ class VLLMConnectionPool:
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         logger.info(f"vLLM engine initialized with model: {self.model_path}")
 
+        # Start queue processor
+        self.queue_processor_task = asyncio.create_task(self._process_queue())
+
+    async def _process_queue(self):
+        """Process queued requests."""
+        while True:
+            try:
+                # Wait for a request in the queue
+                request_data = await self.request_queue.get()
+                if request_data is None:  # Shutdown signal
+                    break
+
+                # Process the request
+                future = request_data["future"]
+                try:
+                    result = await self._execute_request(request_data)
+                    future.set_result(result)
+                except Exception as e:
+                    future.set_exception(e)
+                finally:
+                    self.queued_requests -= 1
+                    QUEUE_SIZE.set(self.queued_requests)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Queue processor error: {e}")
+
+    async def _execute_request(self, request_data):
+        """Execute a queued request."""
+        # This will be called by the queue processor
+        # The actual execution logic will be in the get_connection method
+        return request_data
+
     async def get_connection(self):
-        """Get a connection from the pool."""
+        """Get a connection from the pool with queuing support."""
         if self.engine is None:
             await self.initialize()
-        self.active_requests += 1
-        ACTIVE_REQUESTS.inc()
-        return self.engine
+
+        # Check if we can handle this request immediately
+        if self.active_requests < self.max_connections:
+            self.active_requests += 1
+            ACTIVE_REQUESTS.inc()
+            return self.engine
+
+        # Check if queue is full (backpressure)
+        if self.request_queue.full():
+            self.rejected_requests += 1
+            raise HTTPException(
+                status_code=503, detail="Service at capacity. Please retry later.", headers={"Retry-After": "10"}
+            )
+
+        # Add to queue and wait
+        self.queued_requests += 1
+        QUEUE_SIZE.set(self.queued_requests)
+
+        # Create a future for this request
+        future = asyncio.Future()
+        request_data = {"future": future, "timestamp": time.time()}
+
+        try:
+            await self.request_queue.put(request_data)
+            # Wait for the request to be processed
+            await future
+            self.active_requests += 1
+            ACTIVE_REQUESTS.inc()
+            return self.engine
+        except asyncio.QueueFull as e:
+            self.queued_requests -= 1
+            QUEUE_SIZE.set(self.queued_requests)
+            self.rejected_requests += 1
+            raise HTTPException(
+                status_code=503, detail="Service at capacity. Please retry later.", headers={"Retry-After": "10"}
+            ) from e
 
     async def release_connection(self):
         """Release a connection back to the pool."""
@@ -81,6 +162,12 @@ class VLLMConnectionPool:
 
     async def shutdown(self):
         """Shutdown the engine gracefully."""
+        # Stop queue processor
+        if self.queue_processor_task:
+            await self.request_queue.put(None)  # Shutdown signal
+            await self.queue_processor_task
+
+        # Shutdown engine
         if self.engine:
             await self.engine.shutdown()
             self.engine = None
@@ -137,11 +224,7 @@ async def lifespan(app: FastAPI):
 
         # Create a simple test prompt for warmup
         warmup_prompt = "Hello, this is a test."
-        warmup_params = SamplingParams(
-            temperature=0.7,
-            max_tokens=10,
-            top_p=0.95
-        )
+        warmup_params = SamplingParams(temperature=0.7, max_tokens=10, top_p=0.95)
 
         # Generate a test completion to ensure model is loaded
         warmup_request_id = random_uuid()
@@ -173,6 +256,19 @@ app = FastAPI(
     description="Production-ready vLLM service optimized for Tesla T4",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# Add rate limiter to app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Add CORS middleware if needed
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -218,17 +314,14 @@ async def ready_check():
     Returns 503 during initialization.
     """
     if not connection_pool.is_ready:
-        raise HTTPException(
-            status_code=503,
-            detail="Model is still loading. Please wait..."
-        )
+        raise HTTPException(status_code=503, detail="Model is still loading. Please wait...")
 
     return {
         "status": "ready",
         "model": model_path,
         "timestamp": datetime.utcnow().isoformat(),
         "active_requests": connection_pool.active_requests,
-        "total_requests": connection_pool.total_requests
+        "total_requests": connection_pool.total_requests,
     }
 
 
@@ -239,8 +332,9 @@ async def metrics():
 
 
 @app.post("/generate", response_model=GenerateResponse)
-async def generate(request: GenerateRequest):
-    """Generate text completion."""
+@limiter.limit("100/minute")
+async def generate(request: GenerateRequest, api_key: str = Depends(verify_api_key)):
+    """Generate text completion with authentication."""
     request_id = random_uuid()
     start_time = time.time()
 
@@ -381,8 +475,9 @@ router = APIRouter()
 
 
 @router.post("/v1/completions")
-async def openai_completions(body: dict):
-    """OpenAI-compatible completions endpoint."""
+@limiter.limit("100/minute")
+async def openai_completions(body: dict, api_key: str = Depends(verify_api_key)):
+    """OpenAI-compatible completions endpoint with authentication."""
     prompt = body.get("prompt") or body.get("input") or ""
     max_tokens = int(body.get("max_tokens", 128))
     temperature = float(body.get("temperature", 0.7))
@@ -405,8 +500,8 @@ async def openai_completions(body: dict):
         stream=False,
     )
 
-    # Call the existing generate function
-    response = await generate(request)
+    # Call the existing generate function with api_key
+    response = await generate(request, api_key)
 
     # Format as OpenAI response
     return {
