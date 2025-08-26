@@ -52,12 +52,7 @@ class TestGenerationQuality:
     async def test_basic_generation(self, async_client):
         prompt = "The capital of France is"
         response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": prompt,
-                "max_tokens": 10,
-                "temperature": 0.1
-            }
+            "/v1/completions", json={"prompt": prompt, "max_tokens": 10, "temperature": 0.1}
         )
         assert response.status_code == 200
         data = response.json()
@@ -71,13 +66,7 @@ class TestGenerationQuality:
 
         for _ in range(3):
             response = await async_client.post(
-                "/v1/completions",
-                json={
-                    "prompt": prompt,
-                    "max_tokens": 5,
-                    "temperature": 0.0,
-                    "seed": 42
-                }
+                "/v1/completions", json={"prompt": prompt, "max_tokens": 5, "temperature": 0.0, "seed": 42}
             )
             assert response.status_code == 200
             responses.append(response.json()["choices"][0]["text"])
@@ -88,13 +77,7 @@ class TestGenerationQuality:
     async def test_generation_with_stop_sequences(self, async_client):
         prompt = "List three colors:\n1. Red\n2. Blue\n3."
         response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": prompt,
-                "max_tokens": 50,
-                "temperature": 0.5,
-                "stop": ["\n4.", "\n\n"]
-            }
+            "/v1/completions", json={"prompt": prompt, "max_tokens": 50, "temperature": 0.5, "stop": ["\n4.", "\n\n"]}
         )
         assert response.status_code == 200
         data = response.json()
@@ -106,16 +89,11 @@ class TestGenerationQuality:
     async def test_chat_format_generation(self, async_client):
         messages = [
             {"role": "system", "content": "You are a helpful math tutor."},
-            {"role": "user", "content": "What is 2 times 3?"}
+            {"role": "user", "content": "What is 2 times 3?"},
         ]
 
         response = await async_client.post(
-            "/v1/chat/completions",
-            json={
-                "messages": messages,
-                "max_tokens": 20,
-                "temperature": 0.3
-            }
+            "/v1/chat/completions", json={"messages": messages, "max_tokens": 20, "temperature": 0.3}
         )
         assert response.status_code == 200
         data = response.json()
@@ -128,12 +106,7 @@ class TestGenerationQuality:
         long_prompt += "The end of the story is"
 
         response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": long_prompt,
-                "max_tokens": 20,
-                "temperature": 0.7
-            }
+            "/v1/completions", json={"prompt": long_prompt, "max_tokens": 20, "temperature": 0.7}
         )
         assert response.status_code == 200
         data = response.json()
@@ -141,19 +114,10 @@ class TestGenerationQuality:
 
     @pytest.mark.asyncio
     async def test_batch_generation_consistency(self, async_client):
-        prompts = [
-            "The sun is",
-            "Water freezes at",
-            "Python is a"
-        ]
+        prompts = ["The sun is", "Water freezes at", "Python is a"]
 
         response = await async_client.post(
-            "/v1/completions/batch",
-            json={
-                "prompts": prompts,
-                "max_tokens": 10,
-                "temperature": 0.3
-            }
+            "/v1/completions/batch", json={"prompts": prompts, "max_tokens": 10, "temperature": 0.3}
         )
         assert response.status_code == 200
         data = response.json()
@@ -172,12 +136,7 @@ class TestPerformance:
 
         start_time = time.time()
         response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": prompt,
-                "max_tokens": 50,
-                "temperature": 0.7
-            }
+            "/v1/completions", json={"prompt": prompt, "max_tokens": 50, "temperature": 0.7}
         )
         latency = time.time() - start_time
 
@@ -193,14 +152,7 @@ class TestPerformance:
         tokens_received = 0
 
         async with async_client.stream(
-            "POST",
-            "/v1/completions",
-            json={
-                "prompt": prompt,
-                "max_tokens": 100,
-                "temperature": 0.7,
-                "stream": True
-            }
+            "POST", "/v1/completions", json={"prompt": prompt, "max_tokens": 100, "temperature": 0.7, "stream": True}
         ) as response:
             async for line in response.aiter_lines():
                 if line and not line.startswith("data: [DONE]"):
@@ -216,12 +168,7 @@ class TestPerformance:
     async def test_concurrent_requests(self, async_client):
         async def make_request(prompt: str) -> dict[str, Any]:
             response = await async_client.post(
-                "/v1/completions",
-                json={
-                    "prompt": prompt,
-                    "max_tokens": 20,
-                    "temperature": 0.5
-                }
+                "/v1/completions", json={"prompt": prompt, "max_tokens": 20, "temperature": 0.5}
             )
             return response.json()
 
@@ -244,12 +191,7 @@ class TestPerformance:
 
         for i in range(num_requests):
             response = await async_client.post(
-                "/v1/completions",
-                json={
-                    "prompt": f"Test prompt {i}",
-                    "max_tokens": 10,
-                    "temperature": 0.5
-                }
+                "/v1/completions", json={"prompt": f"Test prompt {i}", "max_tokens": 10, "temperature": 0.5}
             )
             assert response.status_code == 200
             data = response.json()
@@ -269,12 +211,7 @@ class TestMemoryManagement:
 
         for _ in range(10):
             await async_client.post(
-                "/v1/completions",
-                json={
-                    "prompt": "Memory test prompt",
-                    "max_tokens": 100,
-                    "temperature": 0.7
-                }
+                "/v1/completions", json={"prompt": "Memory test prompt", "max_tokens": 100, "temperature": 0.7}
             )
 
         await asyncio.sleep(2)
@@ -290,24 +227,12 @@ class TestMemoryManagement:
         prompt = "The meaning of life is"
 
         first_response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": prompt,
-                "max_tokens": 50,
-                "temperature": 0.0,
-                "seed": 42
-            }
+            "/v1/completions", json={"prompt": prompt, "max_tokens": 50, "temperature": 0.0, "seed": 42}
         )
 
         start_time = time.time()
         second_response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": prompt,
-                "max_tokens": 50,
-                "temperature": 0.0,
-                "seed": 42
-            }
+            "/v1/completions", json={"prompt": prompt, "max_tokens": 50, "temperature": 0.0, "seed": 42}
         )
         cached_latency = time.time() - start_time
 
@@ -319,12 +244,7 @@ class TestErrorRecovery:
     @pytest.mark.asyncio
     async def test_handles_invalid_tokens(self, async_client):
         response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": "Test",
-                "max_tokens": 10000,
-                "temperature": 0.7
-            }
+            "/v1/completions", json={"prompt": "Test", "max_tokens": 10000, "temperature": 0.7}
         )
         assert response.status_code in [200, 400]
         if response.status_code == 200:
@@ -333,14 +253,7 @@ class TestErrorRecovery:
 
     @pytest.mark.asyncio
     async def test_handles_empty_prompt(self, async_client):
-        response = await async_client.post(
-            "/v1/completions",
-            json={
-                "prompt": "",
-                "max_tokens": 10,
-                "temperature": 0.7
-            }
-        )
+        response = await async_client.post("/v1/completions", json={"prompt": "", "max_tokens": 10, "temperature": 0.7})
         assert response.status_code in [200, 400]
 
     @pytest.mark.asyncio
@@ -348,12 +261,7 @@ class TestErrorRecovery:
         tasks = []
         for i in range(50):
             task = async_client.post(
-                "/v1/completions",
-                json={
-                    "prompt": f"Overload test {i}",
-                    "max_tokens": 10,
-                    "temperature": 0.5
-                }
+                "/v1/completions", json={"prompt": f"Overload test {i}", "max_tokens": 10, "temperature": 0.5}
             )
             tasks.append(task)
 
@@ -369,28 +277,17 @@ class TestErrorRecovery:
 class TestTokenization:
     @pytest.mark.asyncio
     async def test_tokenization_accuracy(self, async_client):
-        test_texts = [
-            "Hello, world!",
-            "The quick brown fox",
-            "12345",
-            "🚀🌟✨"
-        ]
+        test_texts = ["Hello, world!", "The quick brown fox", "12345", "🚀🌟✨"]
 
         for text in test_texts:
-            response = await async_client.post(
-                "/v1/tokenize",
-                json={"text": text}
-            )
+            response = await async_client.post("/v1/tokenize", json={"text": text})
             assert response.status_code == 200
             data = response.json()
 
             assert len(data["tokens"]) > 0
             assert len(data["token_ids"]) == len(data["tokens"])
 
-            detokenize_response = await async_client.post(
-                "/v1/detokenize",
-                json={"token_ids": data["token_ids"]}
-            )
+            detokenize_response = await async_client.post("/v1/detokenize", json={"token_ids": data["token_ids"]})
             assert detokenize_response.status_code == 200
             reconstructed = detokenize_response.json()["text"]
 

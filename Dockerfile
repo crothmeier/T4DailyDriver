@@ -51,10 +51,14 @@ ENV MODEL_PATH="TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
 
 # Download model during build with BuildKit cache mount
 RUN --mount=type=cache,target=/cache/hf,sharing=locked \
-    python3 scripts/download_model.py "${MODEL_PATH}" /cache/hf && \
-    # Copy downloaded model to image layer for persistence
-    mkdir -p /model-cache && \
-    cp -r /cache/hf/* /model-cache/ 2>/dev/null || true
+    if python3 scripts/download_model.py "${MODEL_PATH}" /cache/hf; then \
+        echo "Model downloaded successfully" && \
+        mkdir -p /model-cache && \
+        { cp -r /cache/hf/* /model-cache/ 2>/dev/null || true; }; \
+    else \
+        echo "Model download failed, will retry at runtime" && \
+        mkdir -p /model-cache; \
+    fi
 
 # Copy application code
 COPY . .
@@ -62,7 +66,9 @@ COPY . .
 # Create non-root user and fix ownership
 RUN useradd -m -u 1000 vllm && \
     chown -R vllm:vllm /app && \
-    chown -R vllm:vllm /model-cache || true
+    if [ -d /model-cache ]; then \
+        chown -R vllm:vllm /model-cache; \
+    fi
 
 USER vllm
 

@@ -38,7 +38,7 @@ command_exists() {
 # Find Python 3.10
 find_python310() {
     local python_cmd=""
-    
+
     # Check various Python command variations
     for cmd in python3.10 python310 python3; do
         if command_exists "$cmd"; then
@@ -50,7 +50,7 @@ find_python310() {
             fi
         fi
     done
-    
+
     # If python3 wasn't 3.10, check if plain python is
     if [[ -z "$python_cmd" ]] && command_exists python; then
         local version=$(python --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -58,23 +58,23 @@ find_python310() {
             python_cmd="python"
         fi
     done
-    
+
     echo "$python_cmd"
 }
 
 # Main setup function
 main() {
     cd "$PROJECT_ROOT"
-    
+
     echo "========================================="
     echo "   T4 Daily Driver Development Setup"
     echo "========================================="
     echo ""
-    
+
     # Step 1: Find Python 3.10
     log_info "Detecting Python 3.10..."
     PYTHON_CMD=$(find_python310)
-    
+
     if [[ -z "$PYTHON_CMD" ]]; then
         log_error "Python 3.10 not found!"
         echo ""
@@ -84,10 +84,10 @@ main() {
         echo "  Or use pyenv: pyenv install 3.10.13"
         exit 1
     fi
-    
+
     log_success "Found Python 3.10: $PYTHON_CMD"
     $PYTHON_CMD --version
-    
+
     # Step 2: Check for venv module
     log_info "Checking Python venv module..."
     if ! $PYTHON_CMD -m venv --help >/dev/null 2>&1; then
@@ -97,11 +97,11 @@ main() {
         echo "  Other systems: Ensure Python was installed with venv support"
         exit 1
     fi
-    
+
     # Step 3: Create or activate virtual environment
     if [[ -d "$VENV_DIR" ]]; then
         log_info "Virtual environment already exists at $VENV_DIR"
-        
+
         # Check if it's using the correct Python version
         if [[ -f "$VENV_DIR/bin/python" ]]; then
             VENV_PYTHON_VERSION=$("$VENV_DIR/bin/python" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
@@ -127,19 +127,19 @@ main() {
         $PYTHON_CMD -m venv "$VENV_DIR"
         log_success "Virtual environment created at $VENV_DIR"
     fi
-    
+
     # Step 4: Activate virtual environment
     log_info "Activating virtual environment..."
     source "$VENV_DIR/bin/activate"
-    
+
     # Step 5: Upgrade pip, setuptools, wheel
     log_info "Upgrading pip, setuptools, and wheel..."
     pip install --upgrade pip setuptools wheel >/dev/null 2>&1
     log_success "Base packages upgraded"
-    
+
     # Step 6: Install dependencies
     log_info "Installing project dependencies..."
-    
+
     # Check for constraint file
     if [[ -f "constraints-cu121-py310.txt" ]]; then
         log_info "Using constraints file: constraints-cu121-py310.txt"
@@ -148,7 +148,7 @@ main() {
         log_info "Using constraints file: constraints.txt"
         export PIP_CONSTRAINT="constraints.txt"
     fi
-    
+
     # Install main requirements
     if [[ -f "requirements.txt" ]]; then
         log_info "Installing requirements.txt..."
@@ -157,7 +157,7 @@ main() {
     else
         log_warning "requirements.txt not found, skipping main dependencies"
     fi
-    
+
     # Install dev requirements
     if [[ -f "requirements-dev.txt" ]]; then
         log_info "Installing requirements-dev.txt..."
@@ -166,16 +166,16 @@ main() {
     else
         log_warning "requirements-dev.txt not found, skipping dev dependencies"
     fi
-    
+
     # Step 7: Install and configure pre-commit
     log_info "Setting up pre-commit hooks..."
-    
+
     # Install pre-commit if not already installed
     if ! pip show pre-commit >/dev/null 2>&1; then
         log_info "Installing pre-commit..."
         pip install pre-commit
     fi
-    
+
     # Check if pre-commit is already installed (hooks)
     if [[ -f ".git/hooks/pre-commit" ]] && grep -q "pre-commit" ".git/hooks/pre-commit" 2>/dev/null; then
         log_info "Pre-commit hooks already installed"
@@ -185,13 +185,13 @@ main() {
         log_info "Installing pre-commit hooks..."
         pre-commit install
     fi
-    
+
     # Update pre-commit hooks to latest versions
     log_info "Updating pre-commit hook versions..."
     pre-commit autoupdate || log_warning "Could not auto-update some hooks"
-    
+
     log_success "Pre-commit hooks configured"
-    
+
     # Step 8: Create .env.example if it doesn't exist
     if [[ ! -f ".env.example" ]]; then
         log_info "Creating .env.example file..."
@@ -218,7 +218,7 @@ METRICS_PORT=9090
 EOF
         log_success "Created .env.example"
     fi
-    
+
     # Step 9: Display summary
     echo ""
     echo "========================================="
@@ -237,14 +237,14 @@ EOF
     echo "To run tests:"
     echo "  make test"
     echo ""
-    
+
     # Check if direnv is installed
     if command_exists direnv; then
         if [[ -f ".envrc" ]]; then
             log_info "Detected direnv. Run 'direnv allow' to auto-activate the environment"
         fi
     fi
-    
+
     log_success "Development environment is ready!"
 }
 
