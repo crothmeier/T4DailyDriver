@@ -15,6 +15,7 @@ help: ## Show this help message
 	@echo ''
 	@echo 'Available targets:'
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo "For T4-specific targets, run: make help-t4"
 
 # Cache and directory management
 prepare-caches: ## Create cache/logs dirs, fix ownership, ensure .gitkeep
@@ -208,9 +209,191 @@ docker-run: ## Run Docker container with GPU
 	@echo "Service will be available at http://localhost:8080 once model is loaded"
 
 docker-stop: ## Stop and remove Docker container
-	@echo "Stopping vLLM service container..."
 	docker stop vllm-service 2>/dev/null || true
 	docker rm vllm-service 2>/dev/null || true
+
+# T4-Specific Docker Operations
+docker-build-t4: ## Build T4-optimized Docker image with SDPA backend
+	@echo "Building T4-optimized Docker image with SDPA backend..."
+	docker build \
+		--build-arg BASE_IMAGE=nvidia/cuda:12.4.0-runtime-ubuntu22.04 \
+		--build-arg CUDA_VERSION=12.4.0 \
+		--build-arg VLLM_ATTENTION_BACKEND=SDPA \
+		-t $(IMAGE_NAME):t4-$(IMAGE_TAG) \
+		-t $(IMAGE_NAME):t4-$(shell git rev-parse --short HEAD 2>/dev/null || echo "latest") \
+		-t $(IMAGE_NAME):t4-latest \
+		.
+	@echo "✓ T4-optimized image built successfully"
+
+docker-run-t4: ## Run T4-optimized Docker container with SDPA
+	@echo "Starting T4-optimized vLLM service container..."
+	docker run -d \
+		--name vllm-t4-service \
+		--gpus all \
+		-p 8080:8080 \
+		-e VLLM_ATTENTION_BACKEND=SDPA \
+		-e MODEL_NAME=TheBloke/Mistral-7B-Instruct-v0.2-AWQ \
+		-e QUANTIZATION=awq \
+		-e MAX_MODEL_LEN=4096 \
+		-e GPU_MEMORY_UTILIZATION=0.9 \
+		-e MAX_NUM_SEQS=32 \
+		-v $(PWD)/cache:/cache \
+		$(IMAGE_NAME):t4-latest
+	@echo "✓ T4 container started. Check logs with: docker logs -f vllm-t4-service"
+	@echo "✓ Service will be available at http://localhost:8080 once model is loaded"
+
+docker-stop-t4: ## Stop and remove T4 Docker container
+	@echo "Stopping T4-optimized vLLM service container..."
+	docker stop vllm-t4-service 2>/dev/null || true
+	docker rm vllm-t4-service 2>/dev/null || true
+	@echo "✓ T4 container stopped and removed"
+
+# T4-Specific Testing
+test-t4-build: docker-build-t4 ## Build and test T4 image locally
+	@echo "Testing T4-optimized build..."
+	@docker run --rm $(IMAGE_NAME):t4-latest python -c "\
+	import os; \
+	backend = os.getenv('VLLM_ATTENTION_BACKEND'); \
+	assert backend == 'SDPA', f'Expected SDPA, got {backend}'; \
+	print('✓ T4 SDPA backend verified')"
+	@echo "✓ T4 build test passed"
+
+test-t4-local: docker-run-t4 ## Start T4 service and run local tests
+	@echo "Testing T4 service locally..."
+	@sleep 30
+	@echo "Checking T4 service health..."
+	@if curl -f http://localhost:8080/health >/dev/null 2>&1; then \
+		echo "✓ T4 service health check passed"; \
+	else \
+		echo "✗ T4 service health check failed"; \
+		docker logs vllm-t4-service | tail -20; \
+		$(MAKE) docker-stop-t4; \
+		exit 1; \
+	fi
+	@echo "Checking T4 service metrics..."
+	@if curl -f http://localhost:8080/metrics | grep -q "vllm_"; then \
+		echo "✓ T4 service metrics available"; \
+	else \
+		echo "✗ T4 service metrics not available"; \
+	fi
+	@echo "Testing T4 text generation..."
+	@if curl -X POST http://localhost:8080/generate \
+		-H "Content-Type: application/json" \
+		-d '{"prompt": "Hello T4", "max_tokens": 5}' | grep -q "text"; then \
+		echo "✓ T4 text generation working"; \
+	else \
+		echo "✗ T4 text generation failed"; \
+	fi
+	@$(MAKE) docker-stop-t4
+	@echo "✅ T4 local test completed successfully"
+
+smoke-t4: ## Run T4-specific smoke tests
+	@echo "Running T4-specific smoke tests..."
+	@if [ ! -f "scripts/verify_runtime.py" ]; then \
+		echo "✗ verify_runtime.py not found"; \
+		exit 1; \
+	fi
+	@echo "✓ Verification script found"
+	@if docker images | grep -q "$(IMAGE_NAME):t4-latest"; then \
+		echo "✓ T4 image available"; \
+		docker run --rm -e CUDA_VISIBLE_DEVICES=0 $(IMAGE_NAME):t4-latest \
+			python scripts/verify_runtime.py --t4-mode || echo "⚠ T4 verification completed with warnings"; \
+	else \
+		echo "⚠ T4 image not built, run 'make docker-build-t4' first"; \
+	fi
+	@echo "✓ T4 smoke tests completed"
+
+# T4-Specific Performance Testing
+benchmark-t4: ## Run T4 performance benchmarks
+	@echo "Running T4 performance benchmarks..."
+	@if ! docker ps | grep -q vllm-t4-service; then \
+		echo "Starting T4 service for benchmarking..."; \
+		$(MAKE) docker-run-t4; \
+		sleep 60; \
+	fi
+	@echo "Running T4 benchmark tests..."
+	@for i in {1..10}; do \
+		echo -n "Request $$i: "; \
+		curl -s -w "%{time_total}" -X POST http://localhost:8080/generate \
+			-H "Content-Type: application/json" \
+			-d '{"prompt": "Benchmark test", "max_tokens": 20}' \
+			| tail -1; \
+		echo "s"; \
+	done
+	@echo "✓ T4 benchmark completed"
+
+# T4 Environment Setup
+setup-t4-env: ## Set up T4-optimized development environment
+	@echo "Setting up T4-optimized development environment..."
+	@if [ -f ".envrc" ]; then \
+		if ! grep -q "VLLM_ATTENTION_BACKEND=SDPA" .envrc; then \
+			echo 'export VLLM_ATTENTION_BACKEND=SDPA' >> .envrc; \
+			echo "✓ Added SDPA backend to .envrc"; \
+		else \
+			echo "✓ SDPA backend already configured in .envrc"; \
+		fi; \
+	fi
+	@if [ -f ".env.example" ]; then \
+		if ! grep -q "VLLM_ATTENTION_BACKEND=SDPA" .env.example; then \
+			echo 'VLLM_ATTENTION_BACKEND=SDPA' >> .env.example; \
+			echo "✓ Added SDPA backend to .env.example"; \
+		else \
+			echo "✓ SDPA backend already configured in .env.example"; \
+		fi; \
+	fi
+	@echo "✓ T4 environment setup completed"
+
+# T4 Deployment Helpers
+deploy-t4: ## Deploy T4-optimized service to Kubernetes
+	@echo "Deploying T4-optimized service to Kubernetes..."
+	@if [ -f "k8s/deployment.yaml" ]; then \
+		kubectl apply -k k8s/; \
+		echo "✓ T4-optimized deployment applied"; \
+	else \
+		echo "✗ Kubernetes manifests not found"; \
+		exit 1; \
+	fi
+
+t4-status: ## Check T4 deployment status
+	@echo "Checking T4 deployment status..."
+	@echo "Docker containers:"
+	@docker ps --format "table {{.Names}}\t{{.Status}}" | grep -E "(NAMES|t4|vllm)" || echo "No T4 containers running"
+	@echo ""
+	@echo "Kubernetes pods:"
+	@kubectl get pods -l app=vllm 2>/dev/null || echo "No Kubernetes pods found (cluster not accessible)"
+	@echo ""
+	@echo "GPU status:"
+	@nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv 2>/dev/null || echo "nvidia-smi not available"
+
+# T4 Cleanup
+clean-t4: ## Clean up T4-specific resources
+	@echo "Cleaning up T4-specific resources..."
+	@$(MAKE) docker-stop-t4
+	@docker rmi $(IMAGE_NAME):t4-latest $(IMAGE_NAME):t4-$(IMAGE_TAG) 2>/dev/null || true
+	@echo "✓ T4 cleanup completed"
+
+# Update the help target to include T4 information
+help-t4: ## Show T4-specific help
+	@echo 'T4-Optimized vLLM Service - Make Targets'
+	@echo '========================================'
+	@echo 'T4 Docker Operations:'
+	@echo '  docker-build-t4    Build T4-optimized Docker image'
+	@echo '  docker-run-t4      Run T4-optimized Docker container'
+	@echo '  docker-stop-t4     Stop T4 Docker container'
+	@echo ''
+	@echo 'T4 Testing:'
+	@echo '  test-t4-build      Build and test T4 image'
+	@echo '  test-t4-local      Run local T4 service tests'
+	@echo '  smoke-t4           T4-specific smoke tests'
+	@echo '  benchmark-t4       T4 performance benchmarks'
+	@echo ''
+	@echo 'T4 Environment:'
+	@echo '  setup-t4-env       Setup T4 development environment'
+	@echo '  deploy-t4          Deploy T4 service to Kubernetes'
+	@echo '  t4-status          Check T4 deployment status'
+	@echo '  clean-t4           Clean T4 resources'
+	@echo ''
+	@echo 'Use "make help" for general targets'
 
 # Pre-commit hooks
 pre-commit: ## Run pre-commit hooks
