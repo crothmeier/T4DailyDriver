@@ -1,7 +1,11 @@
 services:
   vllm:
-    build: .
-    image: vllm-service:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - CUDA_VERSION=12.4
+    image: vllm-service:cuda124
     container_name: vllm-t4-service
     ports:
       - "8080:8080"
