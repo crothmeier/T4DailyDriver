@@ -80,3 +80,15 @@ logs/*
 # Runtime caches (ignore contents, keep dir)
 cache/*
 !cache/.gitkeep
+
+# Backup files and hygiene artifacts
+*.backup
+*.bak.*
+*.orig
+*.rej
+preflight_*output.json
+*.pyc
+Dockerfile.backup
+Makefile.backup
+requirements-*.backup
+constraints-*.backup

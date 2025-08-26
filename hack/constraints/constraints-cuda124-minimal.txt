@@ -1,0 +1,5 @@
+# Minimal CUDA 12.4 constraints for T4 - only essential version locks
+torch==2.5.1
+transformers>=4.42.4,<4.43
+ray>=2.30.0,<2.35
+fastapi>=0.111.0,<0.112
