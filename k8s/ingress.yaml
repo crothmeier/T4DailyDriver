@@ -17,7 +17,7 @@ spec:
   tls:
   - hosts:
     - vllm.example.com  # Replace with your domain
-    secretName: vllm-tls
+    secretName: vllm-tls  # pragma: allowlist secret (K8s resource ref)
   rules:
   - host: vllm.example.com  # Replace with your domain
     http:

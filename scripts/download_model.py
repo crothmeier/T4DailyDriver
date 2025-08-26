@@ -14,11 +14,7 @@ from huggingface_hub import snapshot_download
 from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
 
 
@@ -31,11 +27,11 @@ class ModelDownloader:
         cache_dir: str | None = None,
         max_retries: int = 5,
         initial_backoff: float = 2.0,
-        max_backoff: float = 60.0
+        max_backoff: float = 60.0,
     ):
         """
         Initialize the model downloader.
-        
+
         Args:
             model_id: The Hugging Face model ID to download
             cache_dir: Directory to cache the model (defaults to HF_HOME)
@@ -54,19 +50,17 @@ class ModelDownloader:
 
     def _calculate_backoff(self, attempt: int) -> float:
         """Calculate exponential backoff time with jitter."""
-        backoff = min(
-            self.initial_backoff * (2 ** attempt),
-            self.max_backoff
-        )
+        backoff = min(self.initial_backoff * (2**attempt), self.max_backoff)
         # Add jitter (±20%)
         import random
+
         jitter = backoff * 0.2 * (2 * random.random() - 1)
         return max(0.1, backoff + jitter)
 
     def download_with_retry(self) -> bool:
         """
         Download the model with exponential backoff retry logic.
-        
+
         Returns:
             True if successful, False otherwise
         """
@@ -105,21 +99,14 @@ class ModelDownloader:
 
                 # Check for model weights (various formats)
                 weight_patterns = ["*.safetensors", "*.bin", "*.pt", "*.pth"]
-                has_weights = any(
-                    list(snapshot_path_obj.glob(pattern))
-                    for pattern in weight_patterns
-                )
+                has_weights = any(list(snapshot_path_obj.glob(pattern)) for pattern in weight_patterns)
 
                 if not has_weights:
                     raise ValueError("No model weight files found!")
 
                 # Report cache size
-                total_size = sum(
-                    f.stat().st_size
-                    for f in snapshot_path_obj.rglob("*")
-                    if f.is_file()
-                )
-                size_gb = total_size / (1024 ** 3)
+                total_size = sum(f.stat().st_size for f in snapshot_path_obj.rglob("*") if f.is_file())
+                size_gb = total_size / (1024**3)
                 logger.info(f"Total model size: {size_gb:.2f} GB")
 
                 return True
@@ -157,7 +144,7 @@ class ModelDownloader:
     def verify_cache(self) -> bool:
         """
         Verify that the model is already cached.
-        
+
         Returns:
             True if model is cached and valid, False otherwise
         """
@@ -167,11 +154,7 @@ class ModelDownloader:
             # Check if config.json is cached
             config_url = hf_hub_url(repo_id=self.model_id, filename="config.json")
             config_path = cached_download(
-                config_url,
-                cache_dir=self.cache_dir,
-                force_download=False,
-                resume_download=False,
-                local_files_only=True
+                config_url, cache_dir=self.cache_dir, force_download=False, resume_download=False, local_files_only=True
             )
 
             if config_path and Path(config_path).exists():
@@ -204,11 +187,7 @@ def main():
 
     # Create downloader
     downloader = ModelDownloader(
-        model_id=model_id,
-        cache_dir=cache_dir,
-        max_retries=5,
-        initial_backoff=2.0,
-        max_backoff=60.0
+        model_id=model_id, cache_dir=cache_dir, max_retries=5, initial_backoff=2.0, max_backoff=60.0
     )
 
     # Check if already cached
