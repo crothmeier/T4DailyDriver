@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Install PyTorch CUDA 12.4 (T4 compatible)
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124
+    torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124
 
 # Install requirements with constraints (no flash-attn, T4-optimized)
 RUN --mount=type=cache,target=/root/.cache/pip \

@@ -1,27 +1,27 @@
 accelerate==0.31.0
 aiofiles==23.2.1
 aiohttp==3.12.15
-fastapi==0.111.0
+fastapi>=0.115.0,<0.116
 httpx==0.27.0
-huggingface-hub==0.24.5
+huggingface-hub>=0.34.0,<1.0
 slowapi==0.1.9
 # Updated for CUDA 12.4 compatibility
 ninja==1.13.0
 numpy==1.26.4
 nvidia-ml-py==13.580.65
-openai==1.99.9
+openai>=1.52.0
 prometheus-client==0.20.0
 prometheus-fastapi-instrumentator==7.1.0
-protobuf==5.27.2
-pydantic==2.7.4
+protobuf>=3.19,<5.0
+pydantic>=2.10,<2.12
 pynvml==11.5.0
 python-multipart==0.0.9
 ray==2.48.0
 sentencepiece==0.2.0
 # PyTorch 2.5.1 is installed separately in Dockerfile with cu124 index
-transformers~=4.42.4
+transformers>=4.55.0,<4.67
 typing-extensions==4.14.1
 uvicorn[standard]==0.30.1
 # Upgrade vLLM to address security vulnerabilities
-vllm>=0.9.0,<0.11.0
+vllm==0.8.5
 # Flash Attention 2 for better performance
