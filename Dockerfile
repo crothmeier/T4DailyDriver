@@ -25,6 +25,7 @@ ENV VLLM_ATTENTION_BACKEND=SDPA \
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.10 python3-pip curl ca-certificates git \
+      python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
