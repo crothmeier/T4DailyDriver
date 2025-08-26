@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_PREFER_BINARY=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3.10 python3-pip curl ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements files
+COPY requirements-cuda124.txt requirements.txt ./
+COPY constraints-cuda124.txt constraints.txt ./
+
+# Use BuildKit cache mount for pip
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --upgrade pip==24.2 setuptools wheel
+
+# Install PyTorch 2.5.1 with CUDA 12.4 support
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Keep CUDA 12.4 wheels preferred for any later installs
+ENV PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu124"
+
+# Install vLLM and other requirements with constraints
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements.txt -c constraints.txt && \
+    python3 -m pip check
+
+# Copy scripts for model download and runtime verification
+COPY scripts/download_model.py scripts/verify_runtime.py scripts/
+
+# Verify runtime versions
+RUN python3 scripts/verify_runtime.py --build-time || echo "Warning: Runtime verification failed during build"
+
+# Pre-download model with cache mount for efficiency
+ENV HF_HOME=/cache/hf
+ENV MODEL_PATH="TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
+
+# Download model during build with BuildKit cache mount
+RUN --mount=type=cache,target=/cache/hf,sharing=locked \
+    if python3 scripts/download_model.py "${MODEL_PATH}" /cache/hf; then \
+        echo "Model downloaded successfully" && \
+        mkdir -p /model-cache && \
+        { cp -r /cache/hf/* /model-cache/ 2>/dev/null || true; }; \
+    else \
+        echo "Model download failed, will retry at runtime" && \
+        mkdir -p /model-cache; \
+    fi
+
+# Copy application code
+COPY . .
+
+# Create non-root user and fix ownership
+RUN useradd -m -u 1000 vllm && \
+    chown -R vllm:vllm /app && \
+    if [ -d /model-cache ]; then \
+        chown -R vllm:vllm /model-cache; \
+    fi
+
+USER vllm
+
+# Expose ports
+EXPOSE 8080
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_VISIBLE_DEVICES=0
+ENV MODEL_PATH="TheBloke/Mistral-7B-Instruct-v0.2-AWQ"
+ENV HF_HOME=/model-cache
+ENV PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:512"
+ENV CUDA_MODULE_LOADING=LAZY
+
+# Add version labels for blue/green deployment
+LABEL cuda.version="12.4.1" \
+      pytorch.version="2.5.1" \
+      vllm.version="0.9+" \
+      deployment.strategy="blue-green" \
+      deployment.variant="cuda124"
+
+# Health check with extended startup period for CUDA 12.4
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:8080/ready || exit 1
+
+# Run the application with runtime verification
+CMD ["sh", "-c", "python3 scripts/verify_runtime.py --startup && python3 -m uvicorn app:app --host 0.0.0.0 --port 8080 --log-level info"]

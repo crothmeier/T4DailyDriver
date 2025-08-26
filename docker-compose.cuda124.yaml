@@ -1,0 +1,237 @@
+services:
+  # CUDA 12.4 vLLM service for blue/green deployment
+  vllm-cuda124:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda124
+    image: vllm-service:cuda124-pt251-vllm09
+    container_name: vllm-t4-service-cuda124
+    ports:
+      - "8081:8080"  # Different port for parallel testing
+    environment:
+      - MODEL_PATH=TheBloke/Mistral-7B-Instruct-v0.2-AWQ
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/cache/hf
+      - VLLM_WORKDIR=/cache/vllm
+      - DEPLOYMENT_VERSION=cuda124-pt251-vllm09
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      - CUDA_MODULE_LOADING=LAZY
+      # Enable performance profiling
+      - VLLM_PROFILE=1
+      - VLLM_TRACE_FUNCTION=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 32G
+          cpus: '8'
+    # Security: Read-only root filesystem with explicit writable mounts
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m  # Increased for CUDA 12.4 runtime
+    volumes:
+      - ./cache/hf:/cache/hf:rw
+      - ./cache/vllm-cuda124:/cache/vllm:rw  # Separate cache for parallel testing
+      - ./cache/config-cuda124:/home/vllm/.config:rw
+      - ./logs-cuda124:/app/logs:rw  # Separate logs for comparison
+      - ./benchmarks:/app/benchmarks:rw  # Benchmark results storage
+    # Security: Drop all capabilities except those needed
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    networks:
+      - vllm-cuda124-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ready || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 360s  # 6 minutes for CUDA 12.4 initialization
+    labels:
+      - "com.deployment.strategy=blue-green"
+      - "com.deployment.version=cuda124"
+      - "com.cuda.version=12.4.1"
+      - "com.pytorch.version=2.5.1"
+      - "com.vllm.version=0.9+"
+
+  # Legacy CUDA 12.1 vLLM service for comparison
+  vllm-legacy:
+    build: .
+    image: vllm-service:cu121-pt231-vllm053
+    container_name: vllm-t4-service-legacy
+    ports:
+      - "8080:8080"
+    environment:
+      - MODEL_PATH=TheBloke/Mistral-7B-Instruct-v0.2-AWQ
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/cache/hf
+      - VLLM_WORKDIR=/cache/vllm
+      - DEPLOYMENT_VERSION=cu121-pt231-vllm053
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 32G
+          cpus: '8'
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    volumes:
+      - ./cache/hf:/cache/hf:rw
+      - ./cache/vllm-legacy:/cache/vllm:rw
+      - ./cache/config-legacy:/home/vllm/.config:rw
+      - ./logs-legacy:/app/logs:rw
+      - ./benchmarks:/app/benchmarks:rw
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    networks:
+      - vllm-cuda124-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ready || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 300s
+    labels:
+      - "com.deployment.strategy=blue-green"
+      - "com.deployment.version=legacy"
+      - "com.cuda.version=12.1.0"
+      - "com.pytorch.version=2.3.1"
+      - "com.vllm.version=0.5.3"
+
+  # Benchmark runner service
+  benchmark-runner:
+    image: python:3.10-slim
+    container_name: benchmark-runner
+    depends_on:
+      vllm-cuda124:
+        condition: service_healthy
+      vllm-legacy:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./benchmarks:/app/benchmarks:rw
+    working_dir: /app
+    command: ["python", "/app/scripts/benchmark_comparison.sh"]
+    networks:
+      - vllm-cuda124-network
+    profiles:
+      - benchmark  # Only run when explicitly requested
+
+  # Prometheus for parallel testing metrics
+  prometheus-cuda124:
+    image: prom/prometheus:latest
+    container_name: prometheus-cuda124
+    ports:
+      - "9091:9090"
+    read_only: true
+    volumes:
+      - ./prometheus-cuda124.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-cuda124-data:/prometheus:rw
+    tmpfs:
+      - /tmp:size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - vllm-cuda124-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Grafana for visualization
+  grafana-cuda124:
+    image: grafana/grafana:latest
+    container_name: grafana-cuda124
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=cuda124admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    read_only: true
+    volumes:
+      - grafana-cuda124-data:/var/lib/grafana:rw
+      - ./grafana/dashboards-cuda124:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources-cuda124:/etc/grafana/provisioning/datasources:ro
+    tmpfs:
+      - /tmp:size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    networks:
+      - vllm-cuda124-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus-cuda124
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+  # NVIDIA DCGM Exporter for GPU metrics comparison
+  dcgm-exporter-cuda124:
+    image: nvidia/dcgm-exporter:3.3.0-3.2.0-ubuntu22.04
+    container_name: dcgm-exporter-cuda124
+    ports:
+      - "9401:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - DCGM_EXPORTER_INTERVAL=10000  # 10 second intervals for detailed monitoring
+    read_only: true
+    tmpfs:
+      - /tmp:size=50M
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    networks:
+      - vllm-cuda124-network
+    restart: unless-stopped
+
+volumes:
+  prometheus-cuda124-data:
+  grafana-cuda124-data:
+
+networks:
+  vllm-cuda124-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16  # Different subnet for isolation

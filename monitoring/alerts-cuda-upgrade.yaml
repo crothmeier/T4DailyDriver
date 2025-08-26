@@ -1,0 +1,376 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cuda-upgrade-alerts
+  namespace: vllm-production
+data:
+  alerts.yaml: |
+    groups:
+    - name: cuda_upgrade_migration
+      interval: 30s
+      rules:
+
+      # TTFT Regression Alert
+      - alert: CUDAUpgradeTTFTRegression
+        expr: |
+          (
+            histogram_quantile(0.95,
+              rate(vllm_request_ttft_seconds_bucket{deployment_version="cuda124"}[5m])
+            ) -
+            histogram_quantile(0.95,
+              rate(vllm_request_ttft_seconds_bucket{deployment_version="legacy"}[5m])
+            )
+          ) /
+          histogram_quantile(0.95,
+            rate(vllm_request_ttft_seconds_bucket{deployment_version="legacy"}[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          migration: cuda124
+          metric: ttft
+        annotations:
+          summary: "CUDA 12.4 deployment shows TTFT regression > 5%"
+          description: |
+            CUDA 12.4 deployment is showing {{ $value | humanizePercentage }} TTFT regression
+            compared to legacy deployment. This exceeds the 5% threshold.
+            Legacy p95: {{ with query "histogram_quantile(0.95, rate(vllm_request_ttft_seconds_bucket{deployment_version='legacy'}[5m]))" }}{{ . | first | value | humanizeDuration }}{{ end }}
+            CUDA 12.4 p95: {{ with query "histogram_quantile(0.95, rate(vllm_request_ttft_seconds_bucket{deployment_version='cuda124'}[5m]))" }}{{ . | first | value | humanizeDuration }}{{ end }}
+
+      # Memory Usage Increase Alert
+      - alert: CUDAUpgradeMemoryIncrease
+        expr: |
+          (
+            avg(container_memory_usage_bytes{pod=~"vllm-cuda124.*"}) -
+            avg(container_memory_usage_bytes{pod=~"vllm-legacy.*"})
+          ) /
+          avg(container_memory_usage_bytes{pod=~"vllm-legacy.*"}) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+          migration: cuda124
+          metric: memory
+        annotations:
+          summary: "CUDA 12.4 deployment shows memory usage increase > 10%"
+          description: |
+            CUDA 12.4 deployment is using {{ $value | humanizePercentage }} more memory
+            than legacy deployment. This exceeds the 10% threshold.
+            Legacy avg: {{ with query "avg(container_memory_usage_bytes{pod=~'vllm-legacy.*'})" }}{{ . | first | value | humanize1024 }}{{ end }}
+            CUDA 12.4 avg: {{ with query "avg(container_memory_usage_bytes{pod=~'vllm-cuda124.*'})" }}{{ . | first | value | humanize1024 }}{{ end }}
+
+      # GPU Memory Alert
+      - alert: CUDAUpgradeGPUMemoryHigh
+        expr: |
+          avg(
+            DCGM_FI_DEV_FB_USED{deployment_version="cuda124"} /
+            DCGM_FI_DEV_FB_FREE{deployment_version="cuda124"}
+          ) > 0.90
+        for: 5m
+        labels:
+          severity: critical
+          migration: cuda124
+          metric: gpu_memory
+        annotations:
+          summary: "CUDA 12.4 deployment GPU memory usage > 90%"
+          description: |
+            CUDA 12.4 deployment is using {{ $value | humanizePercentage }} of available GPU memory.
+            This may lead to OOM errors or performance degradation.
+
+      # Error Rate Alert
+      - alert: CUDAUpgradeErrorRateHigh
+        expr: |
+          rate(vllm_request_errors_total{deployment_version="cuda124"}[5m]) >
+          rate(vllm_request_errors_total{deployment_version="legacy"}[5m]) * 2
+        for: 5m
+        labels:
+          severity: critical
+          migration: cuda124
+          metric: error_rate
+        annotations:
+          summary: "CUDA 12.4 deployment error rate 2x higher than legacy"
+          description: |
+            CUDA 12.4 deployment error rate: {{ $value | humanize }} errors/sec
+            This is more than twice the legacy deployment error rate.
+            Action: Consider rolling back canary deployment.
+
+      # Throughput Degradation Alert
+      - alert: CUDAUpgradeThroughputDegradation
+        expr: |
+          (
+            rate(vllm_request_success_total{deployment_version="legacy"}[5m]) -
+            rate(vllm_request_success_total{deployment_version="cuda124"}[5m])
+          ) /
+          rate(vllm_request_success_total{deployment_version="legacy"}[5m]) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+          migration: cuda124
+          metric: throughput
+        annotations:
+          summary: "CUDA 12.4 deployment shows throughput degradation > 10%"
+          description: |
+            CUDA 12.4 deployment throughput is {{ $value | humanizePercentage }} lower
+            than legacy deployment.
+            Legacy: {{ with query "rate(vllm_request_success_total{deployment_version='legacy'}[5m])" }}{{ . | first | value | humanize }}{{ end }} req/s
+            CUDA 12.4: {{ with query "rate(vllm_request_success_total{deployment_version='cuda124'}[5m])" }}{{ . | first | value | humanize }}{{ end }} req/s
+
+      # P99 Latency Alert
+      - alert: CUDAUpgradeP99LatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            rate(vllm_request_duration_seconds_bucket{deployment_version="cuda124"}[5m])
+          ) >
+          histogram_quantile(0.99,
+            rate(vllm_request_duration_seconds_bucket{deployment_version="legacy"}[5m])
+          ) * 1.2
+        for: 10m
+        labels:
+          severity: warning
+          migration: cuda124
+          metric: p99_latency
+        annotations:
+          summary: "CUDA 12.4 deployment P99 latency 20% higher than legacy"
+          description: |
+            CUDA 12.4 P99 latency: {{ $value | humanizeDuration }}
+            This is more than 20% higher than the legacy deployment P99 latency.
+
+      # Canary Health Check
+      - alert: CUDAUpgradeCanaryUnhealthy
+        expr: |
+          up{job="vllm", deployment_version="cuda124"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          migration: cuda124
+          metric: health
+        annotations:
+          summary: "CUDA 12.4 canary deployment is unhealthy"
+          description: |
+            The CUDA 12.4 canary deployment has been down for more than 3 minutes.
+            Immediate action required: Check pod logs and consider rollback.
+
+      # GPU Utilization Comparison
+      - alert: CUDAUpgradeGPUUtilizationAnomaly
+        expr: |
+          abs(
+            avg(DCGM_FI_DEV_GPU_UTIL{deployment_version="cuda124"}) -
+            avg(DCGM_FI_DEV_GPU_UTIL{deployment_version="legacy"})
+          ) > 20
+        for: 15m
+        labels:
+          severity: info
+          migration: cuda124
+          metric: gpu_utilization
+        annotations:
+          summary: "Significant GPU utilization difference between deployments"
+          description: |
+            GPU utilization differs by {{ $value }}% between CUDA 12.4 and legacy deployments.
+            Legacy: {{ with query "avg(DCGM_FI_DEV_GPU_UTIL{deployment_version='legacy'})" }}{{ . | first | value }}%{{ end }}
+            CUDA 12.4: {{ with query "avg(DCGM_FI_DEV_GPU_UTIL{deployment_version='cuda124'})" }}{{ . | first | value }}%{{ end }}
+            This may indicate different performance characteristics.
+
+      # Model Loading Time
+      - alert: CUDAUpgradeSlowModelLoad
+        expr: |
+          avg(vllm_model_load_duration_seconds{deployment_version="cuda124"}) >
+          avg(vllm_model_load_duration_seconds{deployment_version="legacy"}) * 1.5
+        for: 5m
+        labels:
+          severity: warning
+          migration: cuda124
+          metric: model_load_time
+        annotations:
+          summary: "CUDA 12.4 model loading 50% slower than legacy"
+          description: |
+            CUDA 12.4 deployment takes {{ $value | humanizeDuration }} to load models,
+            which is 50% slower than the legacy deployment.
+
+      # Rollback Trigger
+      - alert: CUDAUpgradeRollbackRecommended
+        expr: |
+          (
+            ALERTS{alertname=~"CUDAUpgrade.*", severity="critical"} >= 2
+          ) or (
+            ALERTS{alertname=~"CUDAUpgrade.*", severity="warning"} >= 3
+          )
+        for: 5m
+        labels:
+          severity: critical
+          migration: cuda124
+          action: rollback
+        annotations:
+          summary: "Multiple CUDA 12.4 migration alerts - rollback recommended"
+          description: |
+            Multiple critical issues detected with CUDA 12.4 canary deployment.
+            Critical alerts: {{ with query "ALERTS{alertname=~'CUDAUpgrade.*', severity='critical'}" }}{{ len . }}{{ end }}
+            Warning alerts: {{ with query "ALERTS{alertname=~'CUDAUpgrade.*', severity='warning'}" }}{{ len . }}{{ end }}
+            Recommendation: Initiate rollback procedure immediately.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cuda-upgrade-grafana-dashboard
+  namespace: vllm-production
+  labels:
+    grafana_dashboard: "1"
+data:
+  cuda-upgrade-migration.json: |
+    {
+      "dashboard": {
+        "title": "CUDA 12.4 Migration Dashboard",
+        "uid": "cuda-upgrade-migration",
+        "timezone": "UTC",
+        "schemaVersion": 27,
+        "panels": [
+          {
+            "title": "Deployment Traffic Split",
+            "type": "piechart",
+            "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+            "targets": [
+              {
+                "expr": "sum(rate(vllm_request_count{deployment_version='legacy'}[5m]))",
+                "legendFormat": "Legacy (CUDA 12.1)"
+              },
+              {
+                "expr": "sum(rate(vllm_request_count{deployment_version='cuda124'}[5m]))",
+                "legendFormat": "CUDA 12.4"
+              }
+            ]
+          },
+          {
+            "title": "TTFT Comparison (p95)",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 9, "x": 6, "y": 0},
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(vllm_request_ttft_seconds_bucket{deployment_version='legacy'}[5m]))",
+                "legendFormat": "Legacy"
+              },
+              {
+                "expr": "histogram_quantile(0.95, rate(vllm_request_ttft_seconds_bucket{deployment_version='cuda124'}[5m]))",
+                "legendFormat": "CUDA 12.4"
+              }
+            ]
+          },
+          {
+            "title": "Memory Usage Comparison",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 9, "x": 15, "y": 0},
+            "targets": [
+              {
+                "expr": "avg(container_memory_usage_bytes{pod=~'vllm-legacy.*'})",
+                "legendFormat": "Legacy"
+              },
+              {
+                "expr": "avg(container_memory_usage_bytes{pod=~'vllm-cuda124.*'})",
+                "legendFormat": "CUDA 12.4"
+              }
+            ]
+          },
+          {
+            "title": "GPU Memory Usage",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+            "targets": [
+              {
+                "expr": "avg(DCGM_FI_DEV_FB_USED{deployment_version='legacy'})",
+                "legendFormat": "Legacy GPU Mem"
+              },
+              {
+                "expr": "avg(DCGM_FI_DEV_FB_USED{deployment_version='cuda124'})",
+                "legendFormat": "CUDA 12.4 GPU Mem"
+              }
+            ]
+          },
+          {
+            "title": "Error Rate Comparison",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+            "targets": [
+              {
+                "expr": "rate(vllm_request_errors_total{deployment_version='legacy'}[5m])",
+                "legendFormat": "Legacy Errors"
+              },
+              {
+                "expr": "rate(vllm_request_errors_total{deployment_version='cuda124'}[5m])",
+                "legendFormat": "CUDA 12.4 Errors"
+              }
+            ]
+          },
+          {
+            "title": "Throughput (req/s)",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+            "targets": [
+              {
+                "expr": "rate(vllm_request_success_total{deployment_version='legacy'}[5m])",
+                "legendFormat": "Legacy"
+              },
+              {
+                "expr": "rate(vllm_request_success_total{deployment_version='cuda124'}[5m])",
+                "legendFormat": "CUDA 12.4"
+              }
+            ]
+          },
+          {
+            "title": "P99 Latency Comparison",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.99, rate(vllm_request_duration_seconds_bucket{deployment_version='legacy'}[5m]))",
+                "legendFormat": "Legacy P99"
+              },
+              {
+                "expr": "histogram_quantile(0.99, rate(vllm_request_duration_seconds_bucket{deployment_version='cuda124'}[5m]))",
+                "legendFormat": "CUDA 12.4 P99"
+              }
+            ]
+          },
+          {
+            "title": "Active Alerts",
+            "type": "table",
+            "gridPos": {"h": 6, "w": 24, "x": 0, "y": 24},
+            "targets": [
+              {
+                "expr": "ALERTS{alertname=~'CUDAUpgrade.*'}",
+                "format": "table",
+                "instant": true
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cuda-upgrade-alerts
+  namespace: vllm-production
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+  - name: cuda_upgrade_migration
+    interval: 30s
+    rules:
+    - alert: CUDAUpgradeCanaryTrafficValidation
+      expr: |
+        abs(
+          (sum(rate(vllm_request_count{deployment_version="cuda124"}[5m])) /
+           sum(rate(vllm_request_count{}[5m]))) - 0.05
+        ) > 0.02
+      for: 10m
+      labels:
+        severity: warning
+        migration: cuda124
+        metric: traffic_split
+      annotations:
+        summary: "CUDA 12.4 canary traffic deviates from 5% target"
+        description: |
+          CUDA 12.4 canary is receiving {{ $value | humanizePercentage }} of traffic.
+          Target is 5% ±2%. Adjust VirtualService weights if needed.

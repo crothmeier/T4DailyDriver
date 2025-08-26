@@ -1,0 +1,55 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    deployment: 'cuda124-canary'
+    environment: 'testing'
+
+scrape_configs:
+  # Legacy vLLM service metrics
+  - job_name: 'vllm-legacy'
+    static_configs:
+      - targets: ['vllm-legacy:8080']
+        labels:
+          deployment_version: 'legacy'
+          cuda_version: '12.1'
+          pytorch_version: '2.3.1'
+          vllm_version: '0.5.3'
+
+  # CUDA 12.4 vLLM service metrics
+  - job_name: 'vllm-cuda124'
+    static_configs:
+      - targets: ['vllm-cuda124:8080']
+        labels:
+          deployment_version: 'cuda124'
+          cuda_version: '12.4'
+          pytorch_version: '2.5.1'
+          vllm_version: '0.9+'
+
+  # DCGM GPU metrics for legacy
+  - job_name: 'dcgm-legacy'
+    static_configs:
+      - targets: ['dcgm-exporter:9400']
+        labels:
+          deployment_version: 'legacy'
+
+  # DCGM GPU metrics for CUDA 12.4
+  - job_name: 'dcgm-cuda124'
+    static_configs:
+      - targets: ['dcgm-exporter-cuda124:9400']
+        labels:
+          deployment_version: 'cuda124'
+
+  # Node exporter for system metrics
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:9100']
+
+rule_files:
+  - 'monitoring/alerts-cuda-upgrade.yaml'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - 'alertmanager:9093'
