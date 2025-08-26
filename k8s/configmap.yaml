@@ -12,3 +12,4 @@ data:
   QUANTIZATION: "awq"
   DTYPE: "float16"
   MAX_CONTEXT_LEN: "4096"
+  VLLM_ATTENTION_BACKEND: "SDPA"  # T4-optimized backend

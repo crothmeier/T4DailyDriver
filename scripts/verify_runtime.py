@@ -2,11 +2,13 @@
 """
 Runtime verification script for GPU stack validation.
 Validates CUDA, PyTorch, and vLLM versions and compatibility.
+Includes T4-specific optimizations and SDPA backend verification.
 """
 
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -160,7 +162,7 @@ class RuntimeVerifier:
             logger.info(f"✓ Flash Attention {flash_version}")
             return True, flash_version
         except ImportError:
-            msg = "Flash Attention not installed (optional)"
+            msg = "Flash Attention not installed (expected for T4 - using SDPA instead)"
             self.warnings.append(msg)
             logger.warning(f"⚠ {msg}")
             return False, "N/A"
@@ -169,6 +171,76 @@ class RuntimeVerifier:
             self.warnings.append(msg)
             logger.warning(f"⚠ {msg}")
             return False, "N/A"
+
+    def get_gpu_info(self) -> str | None:
+        """Get GPU model information."""
+        try:
+            import torch
+
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                return torch.cuda.get_device_properties(0).name
+            return None
+        except Exception:
+            return None
+
+    def verify_attention_backend(self) -> bool:
+        """Verify attention backend compatibility for detected GPU."""
+        backend = os.getenv("VLLM_ATTENTION_BACKEND", "AUTO")
+        gpu_info = self.get_gpu_info()
+
+        if gpu_info is None:
+            # Running in CI or non-GPU environment
+            logger.info("✓ No GPU detected (CI/CPU environment) - skipping backend check")
+            self.verification_results["attention_backend"] = {
+                "backend": backend,
+                "gpu": "None",
+                "status": "skipped",
+                "note": "Running in non-GPU environment",
+            }
+            return True
+
+        # Check for T4 GPU
+        if "T4" in gpu_info:
+            if backend in ("FLASH_ATTENTION_2", "FLASH_ATTN", "FA2"):
+                msg = "T4 (SM75) does not support FlashAttention-2; forcing SDPA is recommended."
+                self.errors.append(msg)
+                logger.error(f"✗ {msg}")
+                self.verification_results["attention_backend"] = {
+                    "backend": backend,
+                    "gpu": gpu_info,
+                    "status": "error",
+                    "note": msg,
+                }
+                return False
+
+            if backend != "SDPA":
+                msg = "T4 GPUs work best with SDPA backend. Consider setting VLLM_ATTENTION_BACKEND=SDPA"
+                self.warnings.append(msg)
+                logger.warning(f"⚠ {msg}")
+                self.verification_results["attention_backend"] = {
+                    "backend": backend,
+                    "gpu": gpu_info,
+                    "status": "warning",
+                    "note": msg,
+                }
+            else:
+                logger.info("✓ SDPA backend configured correctly for T4 GPU")
+                self.verification_results["attention_backend"] = {
+                    "backend": backend,
+                    "gpu": gpu_info,
+                    "status": "optimal",
+                    "note": "T4-optimized SDPA backend configured",
+                }
+        else:
+            logger.info(f"✓ Attention backend: {backend} for GPU: {gpu_info}")
+            self.verification_results["attention_backend"] = {
+                "backend": backend,
+                "gpu": gpu_info,
+                "status": "ok",
+                "note": "Non-T4 GPU detected",
+            }
+
+        return True
 
     def check_gpu_memory(self) -> dict[str, Any]:
         """Check GPU memory availability."""
@@ -274,6 +346,44 @@ class RuntimeVerifier:
             logger.warning(f"⚠ {msg}")
             return False
 
+    def check_model_requirements(self) -> bool:
+        """Check if model requirements match available resources."""
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                logger.warning("⚠ No GPU available - model requirements check skipped")
+                return True
+
+            # Get GPU memory
+            gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            gpu_name = torch.cuda.get_device_properties(0).name
+
+            # Model requirements for Mistral-7B-AWQ
+            required_mem_gb = 8.0  # AWQ quantized model needs ~8GB
+
+            self.verification_results["model_requirements"] = {
+                "model": "Mistral-7B-AWQ",
+                "required_memory_gb": required_mem_gb,
+                "available_memory_gb": round(gpu_mem_gb, 2),
+                "gpu": gpu_name,
+                "sufficient": gpu_mem_gb >= required_mem_gb,
+            }
+
+            if gpu_mem_gb >= required_mem_gb:
+                logger.info(f"✓ Sufficient GPU memory: {gpu_mem_gb:.1f}GB available, {required_mem_gb}GB required")
+                return True
+            else:
+                msg = f"Insufficient GPU memory: {gpu_mem_gb:.1f}GB available, {required_mem_gb}GB required"
+                self.warnings.append(msg)
+                logger.warning(f"⚠ {msg}")
+                return False
+        except Exception as e:
+            msg = f"Error checking model requirements: {str(e)}"
+            self.warnings.append(msg)
+            logger.warning(f"⚠ {msg}")
+            return False
+
     def generate_report(self, output_file: Path | None = None) -> dict[str, Any]:
         """Generate verification report."""
         report = {
@@ -306,6 +416,9 @@ class RuntimeVerifier:
             cuda_ok, cuda_ver = self.check_cuda_version()
             _gpu_info = self.check_gpu_memory()
             driver_ok, driver_ver = self.check_driver_version()
+            # T4-specific checks
+            self.verify_attention_backend()
+            self.check_model_requirements()
         else:
             logger.info("Build-time verification - skipping GPU checks")
 

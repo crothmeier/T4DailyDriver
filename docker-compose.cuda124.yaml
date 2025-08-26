@@ -1,13 +1,14 @@
 services:
-  # CUDA 12.4 vLLM service for blue/green deployment
-  vllm-cuda124:
+  vllm:
     build:
       context: .
-      dockerfile: Dockerfile.cuda124
-    image: vllm-service:cuda124-pt251-vllm09
-    container_name: vllm-t4-service-cuda124
+      dockerfile: Dockerfile
+      args:
+        - CUDA_VERSION=12.4
+    image: vllm-service:cuda124
+    container_name: vllm-t4-service
     ports:
-      - "8081:8080"  # Different port for parallel testing
+      - "8080:8080"
     environment:
       - MODEL_PATH=TheBloke/Mistral-7B-Instruct-v0.2-AWQ
       - CUDA_VISIBLE_DEVICES=0
@@ -15,12 +16,7 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - HF_HOME=/cache/hf
       - VLLM_WORKDIR=/cache/vllm
-      - DEPLOYMENT_VERSION=cuda124-pt251-vllm09
-      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
-      - CUDA_MODULE_LOADING=LAZY
-      # Enable performance profiling
-      - VLLM_PROFILE=1
-      - VLLM_TRACE_FUNCTION=all
+      - VLLM_ATTENTION_BACKEND=SDPA  # T4-optimized backend
     deploy:
       resources:
         reservations:
@@ -34,126 +30,50 @@ services:
     # Security: Read-only root filesystem with explicit writable mounts
     read_only: true
     tmpfs:
-      - /tmp:size=512m  # Increased for CUDA 12.4 runtime
+      - /tmp:size=256m  # Runtime temp files (safe: limited size, memory-backed)
     volumes:
-      - ./cache/hf:/cache/hf:rw
-      - ./cache/vllm-cuda124:/cache/vllm:rw  # Separate cache for parallel testing
-      - ./cache/config-cuda124:/home/vllm/.config:rw
-      - ./logs-cuda124:/app/logs:rw  # Separate logs for comparison
-      - ./benchmarks:/app/benchmarks:rw  # Benchmark results storage
-    # Security: Drop all capabilities except those needed
+      - ./cache/hf:/cache/hf:rw  # HuggingFace cache (safe: required for model downloads)
+      - ./cache/vllm:/cache/vllm:rw  # vLLM working directory (safe: required for vLLM operations)
+      - ./cache/config:/home/vllm/.config:rw  # User config directory (safe: required for vLLM usage reporter)
+      - ./logs:/app/logs:rw  # Application logs (safe: required for observability)
+    # Security: Drop all capabilities except those needed for service operation
     cap_drop:
-      - ALL
+      - ALL  # Drop all capabilities first
     restart: unless-stopped
     networks:
-      - vllm-cuda124-network
+      - vllm-network
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/ready || exit 1"]
       interval: 20s
       timeout: 10s
-      retries: 30
-      start_period: 360s  # 6 minutes for CUDA 12.4 initialization
-    labels:
-      - "com.deployment.strategy=blue-green"
-      - "com.deployment.version=cuda124"
-      - "com.cuda.version=12.4.1"
-      - "com.pytorch.version=2.5.1"
-      - "com.vllm.version=0.9+"
+      retries: 30  # Try for 10 minutes (30 * 20s)
+      start_period: 300s  # Give 5 minutes for model loading
 
-  # Legacy CUDA 12.1 vLLM service for comparison
-  vllm-legacy:
-    build: .
-    image: vllm-service:cu121-pt231-vllm053
-    container_name: vllm-t4-service-legacy
-    ports:
-      - "8080:8080"
-    environment:
-      - MODEL_PATH=TheBloke/Mistral-7B-Instruct-v0.2-AWQ
-      - CUDA_VISIBLE_DEVICES=0
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - HF_HOME=/cache/hf
-      - VLLM_WORKDIR=/cache/vllm
-      - DEPLOYMENT_VERSION=cu121-pt231-vllm053
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-        limits:
-          memory: 32G
-          cpus: '8'
-    read_only: true
-    tmpfs:
-      - /tmp:size=256m
-    volumes:
-      - ./cache/hf:/cache/hf:rw
-      - ./cache/vllm-legacy:/cache/vllm:rw
-      - ./cache/config-legacy:/home/vllm/.config:rw
-      - ./logs-legacy:/app/logs:rw
-      - ./benchmarks:/app/benchmarks:rw
-    cap_drop:
-      - ALL
-    restart: unless-stopped
-    networks:
-      - vllm-cuda124-network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/ready || exit 1"]
-      interval: 20s
-      timeout: 10s
-      retries: 30
-      start_period: 300s
-    labels:
-      - "com.deployment.strategy=blue-green"
-      - "com.deployment.version=legacy"
-      - "com.cuda.version=12.1.0"
-      - "com.pytorch.version=2.3.1"
-      - "com.vllm.version=0.5.3"
-
-  # Benchmark runner service
-  benchmark-runner:
-    image: python:3.10-slim
-    container_name: benchmark-runner
-    depends_on:
-      vllm-cuda124:
-        condition: service_healthy
-      vllm-legacy:
-        condition: service_healthy
-    volumes:
-      - ./scripts:/app/scripts:ro
-      - ./benchmarks:/app/benchmarks:rw
-    working_dir: /app
-    command: ["python", "/app/scripts/benchmark_comparison.sh"]
-    networks:
-      - vllm-cuda124-network
-    profiles:
-      - benchmark  # Only run when explicitly requested
-
-  # Prometheus for parallel testing metrics
-  prometheus-cuda124:
+  prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus-cuda124
+    container_name: prometheus
     ports:
-      - "9091:9090"
+      - "9090:9090"
+    # Security: Read-only root filesystem with explicit writable mount
     read_only: true
     volumes:
-      - ./prometheus-cuda124.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-cuda124-data:/prometheus:rw
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro  # Config (safe: read-only mount)
+      - prometheus-data:/prometheus:rw  # TSDB storage (safe: required for metrics storage)
     tmpfs:
-      - /tmp:size=100M
+      - /tmp:size=100M  # Runtime temp files (safe: limited size for scrape processing)
+    # Security: Drop unnecessary capabilities
     cap_drop:
-      - ALL
+      - ALL  # Drop all capabilities first
     cap_add:
-      - DAC_OVERRIDE
+      - DAC_OVERRIDE  # Bypass file permissions (safe: needed for container user access)
+      # NET_RAW removed - not needed for HTTP scraping
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
     networks:
-      - vllm-cuda124-network
+      - vllm-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
@@ -162,34 +82,36 @@ services:
       retries: 3
       start_period: 30s
 
-  # Grafana for visualization
-  grafana-cuda124:
+  grafana:
     image: grafana/grafana:latest
-    container_name: grafana-cuda124
+    container_name: grafana
     ports:
-      - "3001:3000"
+      - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=cuda124admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
+    # Security: Read-only root filesystem with explicit writable mounts
     read_only: true
     volumes:
-      - grafana-cuda124-data:/var/lib/grafana:rw
-      - ./grafana/dashboards-cuda124:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana/datasources-cuda124:/etc/grafana/provisioning/datasources:ro
+      - grafana-data:/var/lib/grafana:rw  # Data storage (safe: required for dashboards/users)
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro  # Dashboards (safe: read-only)
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro  # Datasources (safe: read-only)
     tmpfs:
-      - /tmp:size=100M
+      - /tmp:size=100M  # Runtime temp files (safe: limited size for dashboard rendering)
+    # Security: Drop unnecessary capabilities
     cap_drop:
-      - ALL
+      - ALL  # Drop all capabilities first
     cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - SETUID
-      - SETGID
+      - CHOWN  # File ownership changes (safe: needed for data dir initialization)
+      - DAC_OVERRIDE  # Bypass file permissions (safe: needed for container user access)
+      - SETUID  # Change process UID (safe: needed for user switching)
+      - SETGID  # Change process GID (safe: needed for group switching)
+      # NET_RAW removed - not needed for HTTP service
     networks:
-      - vllm-cuda124-network
+      - vllm-network
     restart: unless-stopped
     depends_on:
-      - prometheus-cuda124
+      - prometheus
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
       interval: 30s
@@ -197,12 +119,12 @@ services:
       retries: 3
       start_period: 45s
 
-  # NVIDIA DCGM Exporter for GPU metrics comparison
-  dcgm-exporter-cuda124:
-    image: nvidia/dcgm-exporter:3.3.0-3.2.0-ubuntu22.04
-    container_name: dcgm-exporter-cuda124
+  # NVIDIA DCGM Exporter for GPU metrics
+  dcgm-exporter:
+    image: nvidia/dcgm-exporter:3.1.7-3.1.4-ubuntu20.04
+    container_name: dcgm-exporter
     ports:
-      - "9401:9400"
+      - "9400:9400"
     deploy:
       resources:
         reservations:
@@ -213,25 +135,54 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - DCGM_EXPORTER_INTERVAL=10000  # 10 second intervals for detailed monitoring
+    # Security: Read-only root filesystem
     read_only: true
     tmpfs:
-      - /tmp:size=50M
+      - /tmp:size=50M  # Runtime temp files (safe: limited size for metrics collection)
+    # Security: Drop unnecessary capabilities
     cap_drop:
-      - ALL
+      - ALL  # Drop all capabilities first
     cap_add:
-      - DAC_OVERRIDE
+      - DAC_OVERRIDE  # Bypass file permissions (safe: needed for GPU device access)
+      # NET_RAW removed - not needed for metrics export
     networks:
-      - vllm-cuda124-network
+      - vllm-network
     restart: unless-stopped
 
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    # Security: Read-only root filesystem with explicit writable mount
+    read_only: true
+    volumes:
+      - redis-data:/data:rw  # Persistent storage (safe: required for cache persistence)
+    tmpfs:
+      - /tmp:size=64m  # Runtime temp files (safe: limited size for Redis operations)
+    # Security: Drop unnecessary capabilities
+    cap_drop:
+      - ALL  # Drop all capabilities first
+    cap_add:
+      - SETUID  # Redis needs this to switch users
+      - SETGID  # Redis needs this to switch groups
+    networks:
+      - vllm-network
+    restart: unless-stopped
+    command: redis-server --save 60 1 --save 300 10 --save 900 50
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
 volumes:
-  prometheus-cuda124-data:
-  grafana-cuda124-data:
+  prometheus-data:
+  grafana-data:
+  redis-data:
 
 networks:
-  vllm-cuda124-network:
+  vllm-network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.25.0.0/16  # Different subnet for isolation

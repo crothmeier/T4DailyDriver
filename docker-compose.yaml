@@ -12,6 +12,7 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - HF_HOME=/cache/hf
       - VLLM_WORKDIR=/cache/vllm
+      - VLLM_ATTENTION_BACKEND=SDPA  # T4-optimized backend
     deploy:
       resources:
         reservations:
