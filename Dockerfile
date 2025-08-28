@@ -37,13 +37,10 @@ COPY requirements-cuda124.txt constraints-cuda124.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade pip==24.2 setuptools wheel
 
-# Install PyTorch CUDA 12.4 (T4 compatible)
+# Install PyTorch CUDA 12.4 (T4 compatible) and requirements with constraints
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 \
-    torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124
-
-# Install requirements with constraints (no flash-attn, T4-optimized)
-RUN --mount=type=cache,target=/root/.cache/pip \
+    torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 && \
     python3 -m pip install -r requirements-cuda124.txt -c constraints-cuda124.txt && \
     python3 -m pip check && \
     echo "T4 build: Using SDPA attention backend, FA2 explicitly excluded"

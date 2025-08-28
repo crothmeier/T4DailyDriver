@@ -23,16 +23,13 @@ COPY constraints-cuda124.txt constraints.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade pip==24.2 setuptools wheel
 
-# Install PyTorch 2.5.1 with CUDA 12.4 support
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu124
-
+# Install PyTorch 2.5.1 with CUDA 12.4 support and vLLM requirements
 # Keep CUDA 12.4 wheels preferred for any later installs
 ENV PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu124"
 
-# Install vLLM and other requirements with constraints
 RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu124 && \
     python3 -m pip install -r requirements.txt -c constraints.txt && \
     python3 -m pip check
 
