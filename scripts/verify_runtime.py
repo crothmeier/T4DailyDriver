@@ -257,6 +257,23 @@ class RuntimeVerifier:
                     allocated = torch.cuda.memory_allocated(i) / (1024**3)
                     reserved = torch.cuda.memory_reserved(i) / (1024**3)
 
+                    # T4-specific validation
+                    is_t4 = "T4" in props.name
+                    t4_validation = {}
+                    if is_t4:
+                        # Validate T4 specifications
+                        t4_validation["sm_75_verified"] = props.major == 7 and props.minor == 5
+                        t4_validation["expected_memory_gb"] = 15.1  # T4 has ~15.1GB usable
+                        t4_validation["memory_validated"] = 14.5 <= total_memory <= 16.5
+
+                        if not t4_validation["sm_75_verified"]:
+                            msg = f"T4 detected but compute capability is {props.major}.{props.minor}, expected 7.5"
+                            self.warnings.append(msg)
+
+                        if not t4_validation["memory_validated"]:
+                            msg = f"T4 detected but memory is {total_memory:.1f}GB, expected ~15.1GB"
+                            self.warnings.append(msg)
+
                     gpu_info.append(
                         {
                             "device": i,
@@ -264,9 +281,11 @@ class RuntimeVerifier:
                             "total_memory_gb": round(total_memory, 2),
                             "allocated_gb": round(allocated, 2),
                             "reserved_gb": round(reserved, 2),
+                            "available_gb": round(total_memory - reserved, 2),
                             "compute_capability": f"{props.major}.{props.minor}",
-                            "is_t4": "T4" in props.name,
+                            "is_t4": is_t4,
                             "is_l4": "L4" in props.name,
+                            "t4_validation": t4_validation if is_t4 else None,
                         }
                     )
 
@@ -332,6 +351,69 @@ class RuntimeVerifier:
             logger.error(f"✗ {msg}")
             return False, "N/A"
 
+    def check_sdpa_kernel(self) -> bool:
+        """Check SDPA (Scaled Dot Product Attention) kernel availability."""
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                logger.warning("⚠ SDPA check skipped - no GPU available")
+                return True
+
+            # Check if SDPA is available
+            sdpa_available = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+            # Check if we're on a T4 GPU
+            gpu_name = torch.cuda.get_device_properties(0).name if torch.cuda.device_count() > 0 else None
+            is_t4 = gpu_name and "T4" in gpu_name
+
+            # Check PyTorch SDPA backend support
+            sdpa_backends = []
+            if sdpa_available:
+                try:
+                    # Try to check which backends are available
+                    import torch.backends.cuda as cuda_backends
+
+                    if hasattr(cuda_backends, "sdp_kernel"):
+                        # PyTorch 2.0+ SDPA backend check
+                        sdpa_backends.append("native")
+                except Exception:
+                    pass
+
+            self.verification_results["sdpa"] = {
+                "available": sdpa_available,
+                "backends": sdpa_backends,
+                "is_t4_gpu": is_t4,
+                "recommended_for_t4": is_t4 and sdpa_available,
+            }
+
+            if is_t4:
+                if sdpa_available:
+                    logger.info("✓ SDPA kernel available for T4 GPU")
+                else:
+                    msg = "SDPA not available but recommended for T4 GPU"
+                    self.errors.append(msg)
+                    logger.error(f"✗ {msg}")
+                    return False
+            else:
+                if sdpa_available:
+                    logger.info("✓ SDPA kernel available")
+                else:
+                    logger.warning("⚠ SDPA kernel not available")
+
+            return sdpa_available
+
+        except ImportError:
+            msg = "Cannot check SDPA - PyTorch not installed"
+            self.errors.append(msg)
+            logger.error(f"✗ {msg}")
+            return False
+        except Exception as e:
+            msg = f"Error checking SDPA kernel: {str(e)}"
+            self.warnings.append(msg)
+            logger.warning(f"⚠ {msg}")
+            return False
+
     def check_awq_support(self) -> bool:
         """Check AWQ quantization support."""
         try:
@@ -386,8 +468,10 @@ class RuntimeVerifier:
 
     def generate_report(self, output_file: Path | None = None) -> dict[str, Any]:
         """Generate verification report."""
+        from datetime import datetime
+
         report = {
-            "timestamp": str(Path.ctime(Path.cwd())),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "verification_results": self.verification_results,
             "errors": self.errors,
             "warnings": self.warnings,
@@ -418,6 +502,7 @@ class RuntimeVerifier:
             driver_ok, driver_ver = self.check_driver_version()
             # T4-specific checks
             self.verify_attention_backend()
+            self.check_sdpa_kernel()
             self.check_model_requirements()
         else:
             logger.info("Build-time verification - skipping GPU checks")

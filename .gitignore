@@ -86,9 +86,49 @@ cache/*
 *.bak.*
 *.orig
 *.rej
-preflight_*output.json
 *.pyc
 Dockerfile.backup
 Makefile.backup
 requirements-*.backup
 constraints-*.backup
+
+# Artifacts & build outputs
+artifacts/
+__pycache__/
+.pytest_cache/
+*.log
+
+# vLLM/HuggingFace model cache
+*.safetensors
+*.bin
+*.gguf
+*.pt
+*.pth
+*.onnx
+*.msgpack
+model_cache/
+models/
+hub/
+.cache/
+huggingface_hub/
+
+# Benchmarking
+benchmark_results/
+*.csv
+*.bench
+reports/
+
+# Pre-commit
+.pre-commit-config.yaml.lock
+
+# Python virtual environments
+.Python
+pyvenv.cfg
+pip-selfcheck.json
+
+# Security
+.secrets.baseline
+*.key
+*.pem
+*.crt
+*.p12

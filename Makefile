@@ -8,6 +8,7 @@ REGISTRY :=
 PYTHON := python3
 PIP := $(PYTHON) -m pip
 PYTEST := $(PYTHON) -m pytest
+ARTIFACT_DIR ?= artifacts
 
 # Default target
 help: ## Show this help message
@@ -393,7 +394,70 @@ help-t4: ## Show T4-specific help
 	@echo '  t4-status          Check T4 deployment status'
 	@echo '  clean-t4           Clean T4 resources'
 	@echo ''
+	@echo 'T4 Validation:'
+	@echo '  preflight          Run pre-flight validation checks'
+	@echo '  verify-runtime     Verify runtime environment'
+	@echo '  test-t4-validation Run T4 validation tests'
+	@echo '  validate-all       Run all validation checks'
+	@echo ''
 	@echo 'Use "make help" for general targets'
+
+# T4 Validation Targets
+preflight: ## Run pre-flight validation checks for T4 GPU
+	@mkdir -p $(ARTIFACT_DIR)
+	@echo "Running pre-flight checks for T4 GPU and CUDA 12.4..."
+	@bash scripts/preflight_check.sh | tee $(ARTIFACT_DIR)/preflight_output.json
+	@echo ""
+	@echo "Results saved to $(ARTIFACT_DIR)/preflight_output.json"
+
+verify-runtime: ## Verify runtime environment for T4
+	@mkdir -p $(ARTIFACT_DIR)
+	@echo "Verifying runtime environment..."
+	@if command -v python3 >/dev/null 2>&1; then \
+		python3 scripts/verify_runtime.py --output $(ARTIFACT_DIR)/runtime_verification.json; \
+	else \
+		echo "Python3 not found. Skipping runtime verification."; \
+	fi
+
+test-t4-validation: ## Run T4-specific validation tests
+	@echo "Running T4 validation test suite..."
+	@if [ -f test_t4_validation.py ]; then \
+		python3 test_t4_validation.py; \
+	else \
+		echo "test_t4_validation.py not found"; \
+		exit 1; \
+	fi
+
+validate-all: preflight verify-runtime test-t4-validation ## Run all validation checks
+	@echo ""
+	@echo "========================================="
+	@echo "All T4 validation checks completed!"
+	@echo "========================================="
+	@echo "Check the following output files:"
+	@echo "  - $(ARTIFACT_DIR)/preflight_output.json"
+	@echo "  - $(ARTIFACT_DIR)/runtime_verification.json"
+
+freeze-deps: ## Freeze Python dependencies from built image
+	@echo "Freezing Python dependencies from built T4 image..."
+	@if docker images | grep -q "$(IMAGE_NAME):t4-latest"; then \
+		docker run --rm $(IMAGE_NAME):t4-latest pip freeze > constraints.lock.txt; \
+		echo "✓ Dependencies frozen to constraints.lock.txt"; \
+	else \
+		echo "✗ T4 image not found. Build with 'make docker-build-t4' first"; \
+		exit 1; \
+	fi
+
+verify-deps: ## Verify dependency alignment between requirements and lock file
+	@echo "Verifying dependency alignment..."
+	@python3 -c "import sys; \
+		req_file = 'requirements-cuda124.txt'; \
+		lock_file = 'constraints.lock.txt'; \
+		import os; \
+		if not os.path.exists(lock_file): \
+			print('✗ Lock file not found. Run make freeze-deps first'); \
+			sys.exit(1); \
+		print('✓ Dependency files exist'); \
+		print('Check requirements-cuda124.txt vs constraints.lock.txt for alignment')"
 
 # Pre-commit hooks
 pre-commit: ## Run pre-commit hooks
