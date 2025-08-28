@@ -10,6 +10,22 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 10s
 
+  # VLLM Pool with CUDA graph metrics
+  - job_name: 'vllm-pool'
+    static_configs:
+      - targets: ['vllm-pool:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    metric_relabel_configs:
+      # Keep all CUDA graph related metrics
+      - source_labels: [__name__]
+        regex: 'vllm_cuda_.*'
+        action: keep
+      # Keep pool request metrics
+      - source_labels: [__name__]
+        regex: 'vllm_pool_.*'
+        action: keep
+
   # NVIDIA DCGM GPU metrics
   - job_name: 'dcgm'
     static_configs:

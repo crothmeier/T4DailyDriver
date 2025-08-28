@@ -53,22 +53,46 @@ check_cuda_runtime() {
     fi
 }
 
-# Check GPU Presence
+# Check GPU Presence and T4-specific features
 check_gpu_presence() {
     local check_name="gpu_t4"
     if command -v nvidia-smi &> /dev/null; then
         if nvidia-smi &>/dev/null; then
-            local gpu_info=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "")
-            if echo "$gpu_info" | grep -qi "t4"; then
+            local gpu_info=$(nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader 2>/dev/null || echo "")
+
+            # Parse GPU info
+            local gpu_name=$(echo "$gpu_info" | cut -d',' -f1 | xargs)
+            local compute_cap=$(echo "$gpu_info" | cut -d',' -f2 | xargs)
+            local gpu_memory=$(echo "$gpu_info" | cut -d',' -f3 | xargs)
+
+            if echo "$gpu_name" | grep -qi "t4"; then
                 results["${check_name}_status"]="pass"
                 results["${check_name}_detected"]="true"
-                results["${check_name}_name"]=$(echo "$gpu_info" | head -n1)
-                results["${check_name}_count"]=$(echo "$gpu_info" | grep -ci "t4" || echo "1")
+                results["${check_name}_name"]="$gpu_name"
+                results["${check_name}_compute_capability"]="$compute_cap"
+                results["${check_name}_memory"]="$gpu_memory"
+                results["${check_name}_count"]=$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -ci "t4" || echo "1")
+
+                # Validate T4 compute capability (should be 7.5)
+                if [[ "$compute_cap" == "7.5" ]]; then
+                    results["${check_name}_sm75_verified"]="true"
+                else
+                    results["${check_name}_sm75_verified"]="false"
+                    errors["${check_name}_compute_cap"]="Expected SM 7.5 for T4, got $compute_cap"
+                fi
+
+                # Check VRAM (T4 should have 16GB)
+                if echo "$gpu_memory" | grep -q "15360\|15109\|16384"; then
+                    results["${check_name}_16gb_vram"]="true"
+                else
+                    results["${check_name}_16gb_vram"]="false"
+                    errors["${check_name}_vram"]="Unexpected VRAM for T4: $gpu_memory"
+                fi
             else
                 results["${check_name}_status"]="fail"
                 results["${check_name}_detected"]="false"
-                if [[ -n "$gpu_info" ]]; then
-                    errors["${check_name}"]="GPU found but not T4: $gpu_info"
+                if [[ -n "$gpu_name" ]]; then
+                    errors["${check_name}"]="GPU found but not T4: $gpu_name (SM $compute_cap)"
                 else
                     errors["${check_name}"]="No GPU detected"
                 fi
@@ -83,6 +107,45 @@ check_gpu_presence() {
         results["${check_name}_status"]="fail"
         errors["${check_name}"]="nvidia-smi not available"
         EXIT_CODE=1
+    fi
+}
+
+# Check CUDA 12.4 compatibility
+check_cuda_124_compatibility() {
+    local check_name="cuda_124_compat"
+
+    # Check if CUDA 12.4 is compatible with driver
+    if [[ "${results[nvidia_driver_status]}" == "pass" ]]; then
+        local driver_version="${results[nvidia_driver_version]}"
+        # CUDA 12.4 requires driver >= 550.54.14
+        local major_version=$(echo "$driver_version" | cut -d'.' -f1)
+
+        if [[ "$major_version" -ge 550 ]]; then
+            results["${check_name}_driver"]="pass"
+            results["${check_name}_driver_version"]="$driver_version"
+        else
+            results["${check_name}_driver"]="fail"
+            errors["${check_name}_driver"]="Driver $driver_version too old for CUDA 12.4 (need >= 550)"
+            EXIT_CODE=1
+        fi
+    fi
+
+    # Check CUDA runtime version if available
+    if [[ "${results[cuda_runtime_status]}" == "pass" ]]; then
+        local cuda_version="${results[cuda_runtime_version]}"
+        if [[ "$cuda_version" == "12.4" ]] || [[ "$cuda_version" == "12.5" ]] || [[ "$cuda_version" == "12.6" ]]; then
+            results["${check_name}_runtime"]="pass"
+        else
+            results["${check_name}_runtime"]="warning"
+            errors["${check_name}_runtime"]="CUDA runtime $cuda_version may not be compatible"
+        fi
+    fi
+
+    # Overall compatibility status
+    if [[ "${results[${check_name}_driver]}" == "pass" ]]; then
+        results["${check_name}_status"]="pass"
+    else
+        results["${check_name}_status"]="fail"
     fi
 }
 
@@ -257,7 +320,7 @@ format_json_output() {
     echo ""
     echo "  },"
     echo "  \"summary\": {"
-    echo "    \"total_checks\": 7,"
+    echo "    \"total_checks\": 8,"
     echo "    \"passed\": $(echo "${results[@]}" | grep -o "pass" | wc -l || echo "0"),"
     echo "    \"failed\": $(echo "${results[@]}" | grep -o "fail" | wc -l || echo "0"),"
     echo "    \"warnings\": $(echo "${results[@]}" | grep -o "warning" | wc -l || echo "0")"
@@ -267,28 +330,31 @@ format_json_output() {
 
 # Main function
 main() {
-    echo -e "${GREEN}Running Pre-Flight Checks for CUDA 12.4 Upgrade...${NC}" >&2
+    echo -e "${GREEN}Running Pre-Flight Checks for T4 GPU and CUDA 12.4...${NC}" >&2
     echo -e "${GREEN}================================================${NC}" >&2
 
-    echo -e "\n${YELLOW}[1/7] Checking NVIDIA Driver...${NC}" >&2
+    echo -e "\n${YELLOW}[1/8] Checking NVIDIA Driver...${NC}" >&2
     check_nvidia_driver
 
-    echo -e "${YELLOW}[2/7] Checking CUDA Runtime...${NC}" >&2
+    echo -e "${YELLOW}[2/8] Checking CUDA Runtime...${NC}" >&2
     check_cuda_runtime
 
-    echo -e "${YELLOW}[3/7] Checking GPU Presence (Tesla T4)...${NC}" >&2
+    echo -e "${YELLOW}[3/8] Checking GPU Presence (Tesla T4)...${NC}" >&2
     check_gpu_presence
 
-    echo -e "${YELLOW}[4/7] Scanning flash-attn References...${NC}" >&2
+    echo -e "${YELLOW}[4/8] Checking CUDA 12.4 Compatibility...${NC}" >&2
+    check_cuda_124_compatibility
+
+    echo -e "${YELLOW}[5/8] Scanning flash-attn References...${NC}" >&2
     check_flash_attn_references
 
-    echo -e "${YELLOW}[5/7] Checking Docker...${NC}" >&2
+    echo -e "${YELLOW}[6/8] Checking Docker...${NC}" >&2
     check_docker
 
-    echo -e "${YELLOW}[6/7] Checking Docker Compose...${NC}" >&2
+    echo -e "${YELLOW}[7/8] Checking Docker Compose...${NC}" >&2
     check_docker_compose
 
-    echo -e "${YELLOW}[7/7] Checking Project Files...${NC}" >&2
+    echo -e "${YELLOW}[8/8] Checking Project Files...${NC}" >&2
     check_project_files
 
     echo -e "\n${GREEN}================================================${NC}" >&2

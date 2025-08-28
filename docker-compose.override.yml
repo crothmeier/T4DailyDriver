@@ -1,0 +1,3 @@
+services:
+  vllm:
+    container_name: vllm-t4-test

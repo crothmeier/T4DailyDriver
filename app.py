@@ -9,11 +9,12 @@ import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 
 import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
 from slowapi import _rate_limit_exceeded_handler
@@ -22,6 +23,7 @@ from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.outputs import RequestOutput
 from vllm.utils import random_uuid
 
+from app.runtime_warmup import WarmupCacheManager, WarmupConfig
 from auth import limiter, verify_api_key
 from metrics import get_metrics
 
@@ -51,6 +53,11 @@ class VLLMConnectionPool:
         self.total_requests = 0
         self.is_ready = False  # Track if model is fully loaded and warmed up
 
+        # Graduated readiness tracking
+        self.model_loaded = False  # Model successfully initialized
+        self.cuda_graphs_ready = False  # CUDA graphs compiled (if applicable)
+        self.warmup_complete = False  # Initial warmup generation complete
+
         # Request queue management
         self.max_queue_size = int(os.getenv("MAX_QUEUE_SIZE", "50"))
         self.request_queue = asyncio.Queue(maxsize=self.max_queue_size)
@@ -60,8 +67,86 @@ class VLLMConnectionPool:
         self.queued_requests = 0
         self.rejected_requests = 0
 
+        # Initialize warmup cache manager
+        self.warmup_manager = None
+
+    def _is_t4(self) -> bool:
+        """
+        Detect if the current GPU is a Tesla T4.
+
+        Returns:
+            True if Tesla T4 detected, False otherwise.
+        """
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                logger.info("No CUDA devices available")
+                return False
+
+            device_count = torch.cuda.device_count()
+            if device_count == 0:
+                logger.info("No CUDA devices found")
+                return False
+
+            # Check first GPU (index 0)
+            device_name = torch.cuda.get_device_name(0)
+            device_props = torch.cuda.get_device_properties(0)
+
+            logger.info(f"GPU detected: {device_name}")
+            logger.info(f"GPU compute capability: {device_props.major}.{device_props.minor}")
+
+            # T4 has compute capability 7.5 (SM75) and name contains "T4"
+            is_t4 = (
+                ("T4" in device_name or "Tesla T4" in device_name)
+                and device_props.major == 7
+                and device_props.minor == 5
+            )
+
+            if is_t4:
+                logger.info("✓ Tesla T4 GPU detected (SM75 architecture)")
+
+            return is_t4
+
+        except ImportError:
+            logger.warning("PyTorch not available for GPU detection")
+            # Fall back to checking environment variable
+            gpu_name = os.getenv("GPU_NAME", "").lower()
+            return "t4" in gpu_name or "tesla t4" in gpu_name
+        except Exception as e:
+            logger.warning(f"GPU detection failed: {e}")
+            return False
+
+    def _validate_t4_sdpa_enforcement(self):
+        """
+        Validate that SDPA backend is enforced for T4 GPUs.
+
+        Raises:
+            RuntimeError: If T4 detected but SDPA backend not configured.
+        """
+        if self._is_t4():
+            attention_backend = os.getenv("VLLM_ATTENTION_BACKEND", "").upper()
+
+            if attention_backend != "SDPA":
+                error_msg = (
+                    f"Tesla T4 GPU detected but VLLM_ATTENTION_BACKEND='{attention_backend}' "
+                    f"(expected 'SDPA'). T4 GPUs require SDPA backend for optimal performance. "
+                    f"Please set: export VLLM_ATTENTION_BACKEND=SDPA"
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
+            logger.info("✓ T4 SDPA enforcement check passed")
+        else:
+            logger.info("Non-T4 GPU detected, skipping SDPA enforcement")
+
     async def initialize(self):
         """Initialize the vLLM engine with T4-optimized parameters."""
+
+        # Step 1: Validate T4 SDPA enforcement before initialization
+        self._validate_t4_sdpa_enforcement()
+
+        # Step 2: Create engine args
         engine_args = AsyncEngineArgs(
             model=self.model_path,
             tokenizer=self.model_path,
@@ -76,11 +161,84 @@ class VLLMConnectionPool:
             max_seq_len_to_capture=4096,
             disable_custom_all_reduce=True,  # T4 doesn't benefit from custom all-reduce
         )
+
+        # Step 3: Initialize warmup cache manager
+        # Use VLLM_CACHE_DIR env var if set, otherwise use default
+        cache_dir = os.getenv("VLLM_CACHE_DIR", "/tmp/vllm_cache")
+        engine_args.download_dir = cache_dir  # Set for warmup manager to pick up
+        self.warmup_manager = WarmupCacheManager(WarmupConfig.from_engine_args(engine_args))
+
+        # Step 4: Check if we have a cached warmup for this configuration
+        warmup_key = self.warmup_manager.generate_warmup_key()
+        is_cached = self.warmup_manager.is_warmed_up(warmup_key)
+
+        if is_cached:
+            logger.info(f"Using cached warmup for key: {warmup_key}")
+        else:
+            logger.info(f"No warmup cache found for key: {warmup_key}")
+
+        # Step 5: Initialize the engine
+        start_time = time.time()
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
-        logger.info(f"vLLM engine initialized with model: {self.model_path}")
+        init_time = time.time() - start_time
+        self.model_loaded = True  # Mark model as loaded
+        logger.info(f"vLLM engine initialized with model: {self.model_path} in {init_time:.2f}s")
+
+        # Step 6: Post-initialization SM75 architecture assertions for T4
+        if self._is_t4():
+            self._assert_sm75_architecture()
+
+        # Step 7: Mark CUDA graphs as ready (they compile during first inference)
+        # For now, we assume they're ready after model load
+        self.cuda_graphs_ready = True if not os.getenv("ENFORCE_EAGER", "false").lower() == "true" else False
+
+        # Step 8: Mark warmup as complete if not cached
+        if not is_cached:
+            warmup_metadata = {
+                "initialization_time": init_time,
+                "model": self.model_path,
+                "attention_backend": os.getenv("VLLM_ATTENTION_BACKEND", "SDPA"),
+                "gpu": "Tesla T4" if self._is_t4() else "Other",
+            }
+            self.warmup_manager.mark_warmed_up(key=warmup_key, metadata=warmup_metadata)
+            logger.info(f"Warmup cache saved for key: {warmup_key}")
 
         # Start queue processor
         self.queue_processor_task = asyncio.create_task(self._process_queue())
+
+    def _assert_sm75_architecture(self):
+        """
+        Assert that the GPU has SM75 (compute capability 7.5) architecture.
+        This is specific to Tesla T4 GPUs.
+        """
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                device_props = torch.cuda.get_device_properties(0)
+                compute_capability = f"{device_props.major}.{device_props.minor}"
+
+                assert (
+                    device_props.major == 7 and device_props.minor == 5
+                ), f"Expected SM75 (7.5) architecture for T4, but got SM{compute_capability}"
+
+                # Additional T4-specific assertions
+                assert device_props.total_memory >= 15 * (
+                    1024**3
+                ), f"T4 should have ~16GB memory, but found {device_props.total_memory / (1024**3):.1f}GB"
+
+                logger.info("✓ SM75 architecture assertions passed")
+                logger.info(f"  - Compute capability: {compute_capability}")
+                logger.info(f"  - Memory: {device_props.total_memory / (1024**3):.1f}GB")
+                logger.info(f"  - Multiprocessors: {device_props.multi_processor_count}")
+
+        except ImportError:
+            logger.warning("PyTorch not available for SM75 assertion")
+        except AssertionError as e:
+            logger.error(f"SM75 architecture assertion failed: {e}")
+            raise
+        except Exception as e:
+            logger.warning(f"Could not verify SM75 architecture: {e}")
 
     async def _process_queue(self):
         """Process queued requests."""
@@ -160,12 +318,42 @@ class VLLMConnectionPool:
         ACTIVE_REQUESTS.dec()
         self.total_requests += 1
 
+    def get_warmup_cache_info(self) -> dict:
+        """Get information about the warmup cache."""
+        if not self.warmup_manager:
+            return {"enabled": False}
+
+        try:
+            current_key = self.warmup_manager.generate_warmup_key()
+            is_cached = self.warmup_manager.is_warmed_up(current_key)
+            cache_flags = self.warmup_manager.list_warmup_flags()
+
+            return {
+                "enabled": True,
+                "current_key": current_key,
+                "is_cached": is_cached,
+                "total_cached_configs": len(cache_flags),
+                "cache_dir": str(self.warmup_manager.config.cache_dir),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get warmup cache info: {e}")
+            return {"enabled": True, "error": str(e)}
+
     async def shutdown(self):
         """Shutdown the engine gracefully."""
         # Stop queue processor
         if self.queue_processor_task:
             await self.request_queue.put(None)  # Shutdown signal
             await self.queue_processor_task
+
+        # Rotate old warmup cache flags
+        if self.warmup_manager:
+            try:
+                removed = self.warmup_manager.rotate_stale_flags()
+                if removed > 0:
+                    logger.info(f"Cleaned up {removed} stale warmup cache entries")
+            except Exception as e:
+                logger.warning(f"Failed to rotate warmup cache: {e}")
 
         # Shutdown engine
         if self.engine:
@@ -203,6 +391,8 @@ class HealthResponse(BaseModel):
     active_requests: int
     total_requests: int
     gpu_memory_usage_gb: float | None
+    gpu_type: str | None = None
+    warmup_cache: dict | None = None
 
 
 # Initialize connection pool
@@ -236,11 +426,13 @@ async def lifespan(app: FastAPI):
 
         await connection_pool.release_connection()
         logger.info("✓ Model warmup completed successfully")
+        connection_pool.warmup_complete = True  # Mark warmup as complete
         connection_pool.is_ready = True  # Mark as ready after successful warmup
 
     except Exception as e:
         logger.error(f"Model warmup failed: {e}")
         # Continue anyway - warmup is not critical
+        connection_pool.warmup_complete = False  # Warmup failed but continue
         connection_pool.is_ready = True  # Mark as ready even if warmup fails
 
     yield
@@ -281,6 +473,7 @@ async def health_check():
     try:
         # Get GPU memory usage if available
         gpu_memory = None
+        gpu_type = None
         try:
             import pynvml
 
@@ -289,8 +482,21 @@ async def health_check():
             info = pynvml.nvmlDeviceGetMemoryInfo(handle)
             gpu_memory = info.used / 1024**3  # Convert to GB
             GPU_MEMORY_USAGE.set(gpu_memory)
+
+            # Try to get GPU name
+            try:
+                gpu_name = pynvml.nvmlDeviceGetName(handle).decode("utf-8")
+                gpu_type = gpu_name
+            except (pynvml.NVMLError, AttributeError, UnicodeDecodeError) as exc:
+                # Log the specific exception for debugging
+                logger.warning(f"Failed to get GPU name: {exc}")
+                pass
         except Exception:
             pass
+
+        # Fallback GPU detection if pynvml fails
+        if not gpu_type and connection_pool._is_t4():
+            gpu_type = "Tesla T4"
 
         # Always return healthy for liveness - service is running
         return HealthResponse(
@@ -300,6 +506,8 @@ async def health_check():
             active_requests=connection_pool.active_requests,
             total_requests=connection_pool.total_requests,
             gpu_memory_usage_gb=gpu_memory,
+            gpu_type=gpu_type,
+            warmup_cache=connection_pool.get_warmup_cache_info(),
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -316,19 +524,293 @@ async def ready_check():
     if not connection_pool.is_ready:
         raise HTTPException(status_code=503, detail="Model is still loading. Please wait...")
 
+    # Get T4 and attention backend info
+    is_t4 = connection_pool._is_t4()
+    attention_backend = os.getenv("VLLM_ATTENTION_BACKEND", "default")
+
     return {
         "status": "ready",
         "model": model_path,
         "timestamp": datetime.utcnow().isoformat(),
         "active_requests": connection_pool.active_requests,
         "total_requests": connection_pool.total_requests,
+        "gpu_validation": {
+            "is_t4": is_t4,
+            "attention_backend": attention_backend,
+            "t4_sdpa_enforced": is_t4 and attention_backend.upper() == "SDPA",
+        },
+        "warmup_cache": connection_pool.get_warmup_cache_info(),
     }
+
+
+@app.get("/readyz")
+async def readiness_graduated():
+    """
+    Graduated readiness probe endpoint.
+
+    Checks multiple readiness criteria:
+    1. Model loaded - basic engine initialization
+    2. CUDA graphs ready - performance optimizations compiled
+    3. Warmup complete - initial inference test passed
+
+    Behavior controlled by READINESS_STRICT env var:
+    - strict=true (default): Returns 503 until all criteria met
+    - strict=false: Returns 200 with partial status once model loaded
+    """
+    strict_mode = os.getenv("READINESS_STRICT", "true").lower() == "true"
+
+    # Build readiness status
+    readiness_status = {
+        "model_loaded": connection_pool.model_loaded,
+        "cuda_graphs_ready": connection_pool.cuda_graphs_ready,
+        "warmup_complete": connection_pool.warmup_complete,
+    }
+
+    # Calculate overall readiness
+    all_ready = all(readiness_status.values())
+    partial_ready = connection_pool.model_loaded  # At minimum, model must be loaded
+
+    # Determine HTTP status code
+    if strict_mode:
+        # Strict mode: require all criteria
+        is_ready = all_ready
+    else:
+        # Non-strict: partial readiness OK
+        is_ready = partial_ready
+
+    # Build response
+    response_data = {
+        "ready": is_ready,
+        "strict_mode": strict_mode,
+        "status": readiness_status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "model": model_path,
+    }
+
+    # Add details if partially ready
+    if not all_ready and partial_ready:
+        response_data["message"] = "Model loaded, optimizations in progress"
+        response_data["active_requests"] = connection_pool.active_requests
+        response_data["total_requests"] = connection_pool.total_requests
+
+    # Return appropriate response
+    if not is_ready:
+        # Not ready - return 503
+        if not connection_pool.model_loaded:
+            detail = "Model not loaded"
+        elif strict_mode:
+            missing = [k for k, v in readiness_status.items() if not v]
+            detail = f"Waiting for: {', '.join(missing)}"
+        else:
+            detail = "Service initializing"
+
+        return JSONResponse(status_code=503, content={**response_data, "detail": detail})
+
+    # Ready - return 200
+    return JSONResponse(status_code=200, content=response_data)
 
 
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint."""
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/debug/runtime")
+async def debug_runtime():
+    """
+    Debug endpoint for runtime information.
+
+    Returns detailed GPU, memory, and attention backend information.
+    Useful for troubleshooting and performance analysis.
+    """
+    debug_info: dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "model": model_path,
+        "pid": os.getpid(),
+    }
+
+    # GPU Information
+    gpu_info: dict[str, Any] = {}
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+            gpu_info["cuda_available"] = True
+            gpu_info["device_count"] = device_count
+
+            if device_count > 0:
+                # Get info for primary device
+                device = 0
+                props = torch.cuda.get_device_properties(device)
+
+                gpu_info["device_0"] = {
+                    "name": torch.cuda.get_device_name(device),
+                    "compute_capability": f"{props.major}.{props.minor}",
+                    "total_memory_gb": props.total_memory / (1024**3),
+                    "multi_processor_count": props.multi_processor_count,
+                    "is_t4": connection_pool._is_t4(),
+                }
+
+                # Current memory usage
+                memory_allocated = torch.cuda.memory_allocated(device) / (1024**3)
+                memory_reserved = torch.cuda.memory_reserved(device) / (1024**3)
+                max_memory_allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
+
+                gpu_info["memory"] = {
+                    "allocated_gb": round(memory_allocated, 3),
+                    "reserved_gb": round(memory_reserved, 3),
+                    "max_allocated_gb": round(max_memory_allocated, 3),
+                    "free_gb": round((props.total_memory / (1024**3)) - memory_allocated, 3),
+                }
+
+                # CUDA version
+                gpu_info["cuda_version"] = torch.version.cuda
+                gpu_info["cudnn_version"] = (
+                    torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None
+                )
+        else:
+            gpu_info["cuda_available"] = False
+    except ImportError:
+        gpu_info["error"] = "PyTorch not available"
+    except Exception as e:
+        gpu_info["error"] = str(e)
+
+    debug_info["gpu"] = gpu_info
+
+    # Try alternative GPU info via pynvml
+    nvidia_smi_info: dict[str, Any] = {}
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        device_count = pynvml.nvmlDeviceGetCount()
+
+        for i in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+
+            # Get device info
+            name = pynvml.nvmlDeviceGetName(handle).decode("utf-8")
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # Convert to watts
+
+            nvidia_smi_info[f"device_{i}"] = {
+                "name": name,
+                "memory": {
+                    "used_gb": mem_info.used / (1024**3),
+                    "total_gb": mem_info.total / (1024**3),
+                    "free_gb": mem_info.free / (1024**3),
+                },
+                "utilization": {
+                    "gpu_percent": util.gpu,
+                    "memory_percent": util.memory,
+                },
+                "temperature_c": temp,
+                "power_watts": round(power, 2),
+            }
+    except ImportError:
+        nvidia_smi_info["available"] = False
+    except Exception as e:
+        nvidia_smi_info["error"] = str(e)
+
+    if nvidia_smi_info:
+        debug_info["nvidia_smi"] = nvidia_smi_info
+
+    # Attention backend information
+    attention_info = {
+        "backend": os.getenv("VLLM_ATTENTION_BACKEND", "AUTO"),
+        "enforce_eager": os.getenv("ENFORCE_EAGER", "false"),
+        "cuda_graphs_enabled": not (os.getenv("ENFORCE_EAGER", "false").lower() == "true"),
+    }
+
+    # Add T4-specific checks
+    if connection_pool._is_t4():
+        attention_info["t4_detected"] = True
+        attention_info["sdpa_enforced"] = os.getenv("VLLM_ATTENTION_BACKEND", "").upper() == "SDPA"
+        attention_info["recommended_backend"] = "SDPA"
+
+    debug_info["attention"] = attention_info
+
+    # System memory info
+    system_memory: dict[str, Any] = {}
+    try:
+        import psutil
+
+        mem = psutil.virtual_memory()
+        system_memory = {
+            "total_gb": mem.total / (1024**3),
+            "available_gb": mem.available / (1024**3),
+            "used_gb": mem.used / (1024**3),
+            "percent": mem.percent,
+        }
+
+        # Process-specific memory
+        process = psutil.Process(os.getpid())
+        process_mem = process.memory_info()
+        system_memory["process"] = {
+            "rss_gb": process_mem.rss / (1024**3),
+            "vms_gb": process_mem.vms / (1024**3),
+            "percent": process.memory_percent(),
+        }
+    except ImportError:
+        system_memory["available"] = False
+    except Exception as e:
+        system_memory["error"] = str(e)
+
+    debug_info["system_memory"] = system_memory
+
+    # Environment variables (filtered for relevant ones)
+    relevant_env_vars = [
+        "VLLM_ATTENTION_BACKEND",
+        "CUDA_VISIBLE_DEVICES",
+        "ENFORCE_EAGER",
+        "MAX_MODEL_LEN",
+        "GPU_MEMORY_UTILIZATION",
+        "TENSOR_PARALLEL_SIZE",
+        "VLLM_CACHE_DIR",
+        "MODEL_PATH",
+        "READINESS_STRICT",
+        "MAX_QUEUE_SIZE",
+    ]
+
+    env_vars = {k: os.getenv(k, "not set") for k in relevant_env_vars}
+    debug_info["environment"] = env_vars
+
+    # Connection pool state
+    pool_state = {
+        "model_loaded": connection_pool.model_loaded,
+        "cuda_graphs_ready": connection_pool.cuda_graphs_ready,
+        "warmup_complete": connection_pool.warmup_complete,
+        "is_ready": connection_pool.is_ready,
+        "active_requests": connection_pool.active_requests,
+        "total_requests": connection_pool.total_requests,
+        "queued_requests": connection_pool.queued_requests,
+        "rejected_requests": connection_pool.rejected_requests,
+    }
+
+    # Add warmup cache info
+    if connection_pool.warmup_manager:
+        pool_state["warmup_cache"] = connection_pool.get_warmup_cache_info()
+
+    debug_info["pool_state"] = pool_state
+
+    # vLLM engine info (if available)
+    if connection_pool.engine:
+        try:
+            engine_config = connection_pool.engine.engine.model_config
+            debug_info["vllm_config"] = {
+                "model": engine_config.model,
+                "dtype": str(engine_config.dtype),
+                "quantization": engine_config.quantization,
+                "max_model_len": engine_config.max_model_len,
+            }
+        except Exception as e:
+            debug_info["vllm_config"] = {"error": str(e)}
+
+    return JSONResponse(content=debug_info)
 
 
 @app.post("/generate", response_model=GenerateResponse)
