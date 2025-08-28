@@ -148,6 +148,10 @@ On Tesla T4 with Mistral-7B AWQ:
 - Docker and Docker Compose
 - Git
 
+### Interpreter
+
+Local development targets Python 3.11. Note that vLLM 0.5.3 requires Python >=3.11 due to its dependency chain (outlines→pyairports).
+
 ### Development Environment Setup
 
 #### Quick Setup (Recommended)
