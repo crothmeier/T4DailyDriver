@@ -24,4 +24,7 @@ typing-extensions==4.14.1
 uvicorn[standard]==0.30.1
 # Upgrade vLLM to address security vulnerabilities
 vllm==0.8.5
+# Enhanced production dependencies
+tiktoken>=0.8.0
+psutil>=5.9.0
 # Flash Attention 2 for better performance
