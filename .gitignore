@@ -1,134 +1,31 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-.venv
-pip-log.txt
-pip-delete-this-directory.txt
+*.pyc
+.venv/
+.env
+.env.*
 .pytest_cache/
+.mypy_cache/
 .ruff_cache/
-.coverage
 coverage.xml
 htmlcov/
-*.log
+.coverage*
 build/
 dist/
+wheelhouse/
+*.whl
 *.egg-info/
-.ipynb_checkpoints/
-.mypy_cache/
-.dmypy.json
-
-# Model cache
-model_cache/
-*.bin
-*.safetensors
-*.gguf
-
-# Environment
-.env
-*.env
-!.env.example
-.env.local
-.env.*.local
-
-# IDE
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Docker
-*.pid
-
-# Kubernetes
-*.kubeconfig
-
-# Logs
 logs/
 *.log
-
-# Data
-data/
-*.db
-*.sqlite
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-
-# Local docker-compose overrides (keep out of git)
-docker-compose.override.local.yml
-docker-compose.local.yml
-*.local.yml
-*.local.yaml
-
-# Logs (ignore contents, keep dir)
-logs/*
-!logs/.gitkeep
-
-# Runtime caches (ignore contents, keep dir)
-cache/*
-!cache/.gitkeep
-
-# Backup files and hygiene artifacts
-*.backup
-*.bak.*
-*.orig
-*.rej
-*.pyc
-Dockerfile.backup
-Makefile.backup
-requirements-*.backup
-constraints-*.backup
-
-# Artifacts & build outputs
-artifacts/
-__pycache__/
-.pytest_cache/
-*.log
-
-# vLLM/HuggingFace model cache
-*.safetensors
-*.bin
-*.gguf
-*.pt
-*.pth
-*.onnx
-*.msgpack
-model_cache/
+# HF/models/caches
+cache/
 models/
-hub/
-.cache/
-huggingface_hub/
-
-# Benchmarking
-benchmark_results/
-*.csv
-*.bench
-reports/
-
-# Pre-commit
-.pre-commit-config.yaml.lock
-
-# Python virtual environments
-.Python
-pyvenv.cfg
-pip-selfcheck.json
-
-# Security
-.secrets.baseline
-*.key
-*.pem
-*.crt
-*.p12
+data/
+hf_cache/
+.huggingface/
+HF_HOME/
+TRANSFORMERS_CACHE/
+# Docker
+*.tar

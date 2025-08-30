@@ -1,8 +1,4 @@
 * text=auto eol=lf
-*.py text diff=python
 *.sh text eol=lf
-*.safetensors binary
-*.bin binary
-*.gguf binary
-*.pt binary
-*.pth binary
+*.py text eol=lf
+*.md text eol=lf
