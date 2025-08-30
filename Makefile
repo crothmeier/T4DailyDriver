@@ -96,6 +96,26 @@ port-forward: ## Port forward to Kubernetes service
 metrics: ## Show current metrics
 	@curl -s http://localhost:8080/metrics | grep -E "^vllm_" | grep -v "#"
 
+metrics-enhanced: ## Show enhanced production metrics
+	@echo "Core Metrics:"
+	@curl -s http://localhost:8080/metrics | grep -E "^vllm_request_total|^vllm_active_requests|^vllm_token_throughput" | head -10
+	@echo ""
+	@echo "Performance Metrics:"
+	@curl -s http://localhost:8080/metrics | grep -E "^vllm_ttft_seconds|^vllm_tps_per_request|^vllm_request_duration" | head -10
+	@echo ""
+	@echo "GPU Metrics:"
+	@curl -s http://localhost:8080/metrics | grep -E "^vllm_gpu_" | head -10
+	@echo ""
+	@echo "Circuit Breaker & Queue:"
+	@curl -s http://localhost:8080/metrics | grep -E "^vllm_circuit_breaker_state|^vllm_queue_" | head -10
+
+health-check-enhanced: ## Check enhanced service health with details
+	@echo "Health Check:"
+	@curl -s http://localhost:8080/healthz | jq '.'
+	@echo ""
+	@echo "OpenAI Models:"
+	@curl -s http://localhost:8080/v1/models | jq '.'
+
 clean: ## Clean up resources
 	docker-compose down -v
 	docker rmi $(IMAGE_NAME):$(IMAGE_TAG) || true
@@ -125,6 +145,10 @@ test: test-unit test-integration ## Run all tests
 test-unit: ## Run unit tests with coverage
 	@echo "Running unit tests..."
 	$(PYTEST) tests/unit/ -v --cov=app --cov-report=term-missing --cov-report=html --cov-report=xml
+
+test-unit-enhanced: ## Run enhanced unit tests for production service
+	@echo "Running enhanced unit tests..."
+	$(PYTEST) tests/unit/test_app_enhanced.py -v --cov=app --cov-report=term-missing
 
 test-integration: ## Run integration tests
 	@echo "Running integration tests..."
@@ -194,6 +218,17 @@ docker-build: ## Build Docker image with proper CUDA support
 		-t $(IMAGE_NAME):$(shell git rev-parse --short HEAD 2>/dev/null || echo "latest") \
 		.
 
+docker-build-enhanced: ## Build enhanced production Docker image with CUDA 12.4
+	docker build \
+		--build-arg BASE_IMAGE=nvidia/cuda:12.4.0-runtime-ubuntu22.04 \
+		--build-arg CUDA_VERSION=12.4.0 \
+		--build-arg VLLM_ATTENTION_BACKEND=SDPA \
+		-f Dockerfile.cuda124 \
+		-t $(IMAGE_NAME):enhanced-$(IMAGE_TAG) \
+		-t $(IMAGE_NAME):enhanced-$(shell git rev-parse --short HEAD 2>/dev/null || echo "latest") \
+		.
+	@echo "✓ Enhanced production image built successfully"
+
 docker-run: ## Run Docker container with GPU
 	@echo "Starting vLLM service container..."
 	docker run -d \
@@ -209,9 +244,44 @@ docker-run: ## Run Docker container with GPU
 	@echo "Container started. Check logs with: docker logs -f vllm-service"
 	@echo "Service will be available at http://localhost:8080 once model is loaded"
 
+docker-run-enhanced: ## Run enhanced production container with monitoring
+	@echo "Starting enhanced vLLM production service..."
+	docker run -d \
+		--name vllm-enhanced \
+		--gpus all \
+		-p 8080:8080 \
+		-p 9090:9090 \
+		-e VLLM_ATTENTION_BACKEND=SDPA \
+		-e MODEL_PATH=TheBloke/Mistral-7B-Instruct-v0.2-AWQ \
+		-e QUANTIZATION=awq \
+		-e MAX_MODEL_LEN=4096 \
+		-e GPU_MEMORY_UTILIZATION=0.9 \
+		-e MAX_NUM_SEQS=32 \
+		-e UVICORN_WORKERS=1 \
+		-e CORS_ORIGINS="*" \
+		-e API_KEYS="" \
+		-e DEFAULT_RATE_LIMIT=100 \
+		-e RATE_LIMIT_WINDOW_MINUTES=1 \
+		-e VLLM_CACHE_DIR=/cache/vllm \
+		-e HF_HOME=/cache/hf \
+		-e ENABLE_REQUEST_TRACING=true \
+		-e READINESS_STRICT=false \
+		-v $(PWD)/cache:/cache \
+		-v $(PWD)/logs:/logs \
+		$(IMAGE_NAME):enhanced-latest
+	@echo "✓ Enhanced service started"
+	@echo "✓ API: http://localhost:8080"
+	@echo "✓ Metrics: http://localhost:8080/metrics"
+	@echo "✓ Health: http://localhost:8080/healthz"
+	@echo "✓ OpenAI Chat: POST http://localhost:8080/v1/chat/completions"
+
 docker-stop: ## Stop and remove Docker container
 	docker stop vllm-service 2>/dev/null || true
 	docker rm vllm-service 2>/dev/null || true
+
+docker-stop-enhanced: ## Stop and remove enhanced container
+	docker stop vllm-enhanced 2>/dev/null || true
+	docker rm vllm-enhanced 2>/dev/null || true
 
 # T4-Specific Docker Operations
 docker-build-t4: ## Build T4-optimized Docker image with SDPA backend
