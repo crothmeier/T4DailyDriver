@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1
 FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
-# Metadata for T4 optimization
-LABEL description="vLLM Service optimized for Tesla T4 GPU with SDPA backend"
-LABEL gpu.architecture="Turing SM75"
-LABEL attention.backend="SDPA"
+# Enhanced metadata for production vLLM service
+LABEL description="Production-hardened vLLM Service with comprehensive features"
+LABEL version="2.0.0"
+LABEL gpu.architectures="Turing SM75, Ada SM89, Ampere SM86"
+LABEL attention.backends="SDPA,FLASH_ATTN"
+LABEL features="OpenAI-API,CircuitBreakers,Metrics,OOMPrevention"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -14,13 +16,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DEFAULT_TIMEOUT=120 \
     PIP_PREFER_BINARY=1
 
-# T4-optimized environment defaults
-ENV VLLM_ATTENTION_BACKEND=SDPA \
+# Production-optimized environment defaults
+ENV VLLM_ATTENTION_BACKEND=AUTO \
     GPU_MEMORY_UTILIZATION=0.9 \
-    MAX_NUM_SEQS=32 \
+    TENSOR_PARALLEL_SIZE=1 \
     BLOCK_SIZE=16 \
     QUANTIZATION=awq \
-    DTYPE=float16
+    DTYPE=float16 \
+    ENABLE_PREFIX_CACHING=true \
+    ENABLE_FUNCTION_CALLING=true \
+    ENABLE_REQUEST_TRACING=true
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -57,15 +62,21 @@ USER vllm
 # Expose ports
 EXPOSE 8080
 
-# Set T4-specific runtime environment
+# Enhanced runtime environment
 ENV PYTHONUNBUFFERED=1 \
     CUDA_VISIBLE_DEVICES=0 \
     MODEL_PATH="TheBloke/Mistral-7B-Instruct-v0.2-AWQ" \
-    HF_HOME=/cache/hf
+    HF_HOME=/cache/hf \
+    VLLM_CACHE_DIR=/cache/vllm \
+    MAX_QUEUE_SIZE=100 \
+    REQUEST_TIMEOUT_STREAMING=300 \
+    REQUEST_TIMEOUT_BATCH=60 \
+    CIRCUIT_BREAKER_FAILURES=5 \
+    ENABLE_PROMETHEUS=true
 
-# Health check with T4-specific validation
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+# Enhanced health check with comprehensive validation
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8080/health && curl -f http://localhost:8080/readyz || exit 1
 
-# Run with T4-optimized vLLM server
-CMD ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]
+# Run enhanced production vLLM server
+CMD ["python3", "-m", "uvicorn", "app_enhanced:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info", "--access-log"]
